@@ -1,0 +1,42 @@
+# ================= 启动器本体与上游源码 =================
+# 来自 Badqf/PCL-Harness，体积大且与本项目无关，需要时自行下载
+PCL-Harness.exe
+PCL-Harness-3.*/
+PCL-Harness-Plugin-SDK-*/
+PCLH-Ai-chat-Plugin-main/
+
+# ================= 本地编译工具链 =================
+# Roslyn vbc + net48 参考程序集 + 从 exe 提取的宿主库（见 README「自行编译」）
+.tools/
+
+# ================= 运行时数据 =================
+# .minecraft/ 里有测试实例；PCLHarness/ 里有插件设置（含 API Key）、会话与日志
+.minecraft/
+PCLHarness/
+
+# ================= 构建产物 =================
+*.dll
+*.pdb
+bin/
+obj/
+*.zip
+
+# ================= 插件运行时生成的数据 =================
+data/
+drafts/
+notes/
+exports/
+downloads/
+logos/
+
+# ================= 编辑器 / 系统杂项 =================
+.vs/
+*.user
+*.suo
+Thumbs.db
+desktop.ini
+.workbuddy/
+
+# ================= 发布包：只保留 dist/ 下的 =================
+*.pclplugin
+!dist/*.pclplugin

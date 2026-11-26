@@ -1,0 +1,55 @@
+{
+  "id": "aiplus",
+  "name": "AI 助手 Pro",
+  "version": "0.5.1",
+  "author": "异天庄主",
+  "description": "启动页右侧的 AI 对话卡片：多会话（新建 / 切换 / 改名 / 导出，输入草稿按会话保留，切页不丢）、流式输出、上下文用量；能真的装游戏——原版、Forge / NeoForge / OptiFine / Fabric 加载器（走启动器自己的安装流程，进度显示在任务栏），也能下载任意直链、Modrinth 与 CurseForge 内容并装进当前实例。基于插件 API v10：整合包交给宿主安装（任务管理可看进度、可取消），内容文件由宿主直接写进实例并做 SHA-1 校验。",
+  "entry": "AiPlusPlugin",
+  "dll": "AiPlus.Plugin.dll",
+  "minApiVersion": 10,
+  "license": "GPL-3.0",
+  "permissions": {
+    "ui": true,
+    "net": {
+      "hosts": [
+        "api.modrinth.com",
+        "cdn.modrinth.com",
+        "api.curseforge.com",
+        "mediafilez.forgecdn.net",
+        "edge.forgecdn.net",
+        "media.forgecdn.net",
+        "mod.mcimirror.top",
+        "raw.githubusercontent.com",
+        "objects.githubusercontent.com",
+        "github.com",
+        "piston-meta.mojang.com",
+        "piston-data.mojang.com",
+        "launchermeta.mojang.com",
+        "bmclapi2.bangbang93.com"
+      ]
+    },
+    "net.dynamic": true,
+    "args": true,
+    "plugins": true,
+    "instance.read": true,
+    "instance.select": true,
+    "instance.install": true,
+    "instance.write": true,
+    "modpack.install": true,
+    "files": {
+      "read": [
+        "S:\\mc\\luncher\\plugin\\AI_main\\.minecraft\\versions\\*",
+        "..\\.minecraft\\versions\\*"
+      ],
+      "write": [
+        "S:\\mc\\luncher\\plugin\\AI_main\\.minecraft\\versions\\*",
+        "..\\.minecraft\\versions\\*"
+      ]
+    },
+    "logs.read": true,
+    "mods.read": true,
+    "mods.write": true,
+    "launch": true,
+    "settings.global": true
+  }
+}
