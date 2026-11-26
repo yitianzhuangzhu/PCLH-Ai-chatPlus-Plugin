@@ -3056,7 +3056,8 @@ Public Class AiPlusPlugin
         Dim TouchesInstance As Boolean =
             Op = "download_modrinth" OrElse Op = "download_curseforge" OrElse Op = "install_download"
         If Op = "download_mods_batch" Then
-            TouchesInstance = Not String.Equals(If(JsonStringField(ArgsJson, "install"), "true").Trim(), "false", StringComparison.OrdinalIgnoreCase)
+            Dim InsFlag As Boolean? = JsonBoolField(ArgsJson, "install")
+            TouchesInstance = Not (InsFlag.HasValue AndAlso InsFlag.Value = False)
         ElseIf Op = "download_file" Then
             TouchesInstance = If(JsonStringField(ArgsJson, "install"), "").Trim().Length > 0
         End If
