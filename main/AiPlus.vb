@@ -106,7 +106,7 @@ Public Class AiPlusPlugin
     ''' <summary>CurseForge API Key（加密存储）。为空时按环境变量 / PCL\Secrets.json 兜底。</summary>
     Private CfKey As String = ""
 
-    Private Const PromptVer As Integer = 10
+    Private Const PromptVer As Integer = 11
 
     Private Function DefaultSysPrompt() As String
         Return "你是 PCL Harness 启动器里的助手。回答简洁、直接，用中文；不确定就直说不确定，不要编。" & Environment.NewLine & Environment.NewLine &
@@ -148,6 +148,8 @@ Public Class AiPlusPlugin
             "· 问「我装了哪些 mod / 有没有冲突 / 缺什么前置」时用 mods_scan（读 jar 里的真实 modid 和依赖声明），不要拿文件名猜版本；" & Environment.NewLine &
             "· 要确认画质、内存、某个 mod 的配置时，用 read_instance_file 读 options.txt / config 下的原文，照着实际值给建议；" & Environment.NewLine &
             "· fetch_url 只能抓白名单里的站（Modrinth、CurseForge、GitHub、Mojang、镜像），名单外的会弹窗问用户；被拒绝就换站或直接说明拿不到，不要反复抓同一个地址；" & Environment.NewLine &
+            "· 联网有三条路，别用错：① 服务商自带联网（GLM 的 web_search、Kimi 的 $web_search、Qwen 的 enable_search）由服务端检索，你直接答并给出来源链接即可，不要在答完后又说「我无法联网」；② 有 web_search 工具时优先调它，一次拿到标题 + 链接 + 摘要；③ 已知具体网址才用 fetch_url 抓正文。" & Environment.NewLine &
+            "· 搜不到就说搜不到，不要用训练记忆假装是搜到的结果；训练记忆里的版本号、模组发布时间经常过时，涉及「最新 / 现在」的问题一律以工具结果为准。" & Environment.NewLine &
             "· 联网结果和训练记忆要分清楚：说「我查到的」时必须有对应工具返回，否则就说「我印象里」，并且提醒可能过时。" & Environment.NewLine &
             Environment.NewLine &
             "能力边界（很重要）：" & Environment.NewLine &
@@ -213,8 +215,20 @@ Public Class AiPlusPlugin
     Private Class ToolCallReq
         Public Id As String
         Public Name As String
+        ''' <summary>function（本地执行）或 builtin_function（Kimi 的 $web_search，客户端只回传参数、由服务端检索）。</summary>
+        Public Kind As String = "function"
         Public Args As New StringBuilder()
     End Class
+
+    ' ==================== 模型自带联网 ====================
+    ''' <summary>是否让模型侧自带的联网搜索（GLM / Kimi / DeepSeek / Qwen）去查资料。</summary>
+    Private WebSearchOn As Boolean = True
+    ''' <summary>这次请求是否真的把服务端联网工具塞进去了（失败后据此决定要不要降级重试）。</summary>
+    Private ServerSearchInjected As Boolean = False
+    ''' <summary>本进程里服务端联网工具被接口拒过一次就不再贴，免得每轮都白失败一遍。</summary>
+    Private ServerSearchBroken As Boolean = False
+    ''' <summary>识别联网方式所依赖的三项配置；变了才重新给被拒过的接口一次机会。</summary>
+    Private SearchSig As String = ""
 
     ' ==================== 生命周期 ====================
 
@@ -285,6 +299,20 @@ Public Class AiPlusPlugin
         End Try
     End Function
 
+    Private Function GetBool(Key As String, Def As Boolean) As Boolean
+        Try
+            Dim V = Host.GetSetting(Key, CObj(Def))
+            If V Is Nothing Then Return Def
+            If TypeOf V Is Boolean Then Return CBool(V)
+            Dim S = V.ToString().Trim().ToLowerInvariant()
+            If S = "true" OrElse S = "1" OrElse S = "yes" OrElse S = "on" Then Return True
+            If S = "false" OrElse S = "0" OrElse S = "no" OrElse S = "off" Then Return False
+            Return Def
+        Catch ex As Exception
+            Return Def
+        End Try
+    End Function
+
     Private Sub LoadSettings()
         BaseUrl = GetStr("apiBase", "https://api.deepseek.com")
         ApiKey = UnprotectSecret(GetStr("apiKey", ""))
@@ -299,6 +327,13 @@ Public Class AiPlusPlugin
         End If
         ModelName = GetStr("model", "deepseek-chat")
         CtxLimit = GetInt("contextLimit", 64000)
+        WebSearchOn = GetBool("webSearch", True)
+        ' 改了接口 / 模型 / 开关，就给被拒过的接口重新试一次的机会
+        Dim Sig As String = If(BaseUrl, "") & "|" & If(ModelName, "") & "|" & WebSearchOn.ToString()
+        If Not String.Equals(Sig, SearchSig, StringComparison.Ordinal) Then
+            SearchSig = Sig
+            ServerSearchBroken = False
+        End If
         SessionCap = Math.Max(5, Math.Min(500, GetInt("maxSessions", 50)))
         CfKey = UnprotectSecret(GetStr("cfApiKey", ""))
         Dim StoredCf As String = GetStr("cfApiKey", "")
@@ -432,6 +467,79 @@ Public Class AiPlusPlugin
         If B.Length = 0 Then B = "https://api.deepseek.com"
         If B.EndsWith("/chat/completions", StringComparison.OrdinalIgnoreCase) Then Return B
         Return B & "/chat/completions"
+    End Function
+
+    ' ==================== 模型自带联网 ====================
+    ' 各家在 OpenAI 兼容接口上开联网的方式完全不同，必须分开处理：
+    '   GLM     ：tools 里加 {"type":"web_search","web_search":{"enable":true}}
+    '   Kimi    ：tools 里加 {"type":"builtin_function","function":{"name":"$web_search"}}，
+    '             模型返回 tool_calls 后客户端把 arguments 原样回传，检索由服务端完成
+    '   Qwen    ：顶层参数 enable_search:true（不在 tools 里）
+    '   DeepSeek：服务端工具 deepseek_web_search / deepseek_read_url 明确不允许和自定义 function 混用，
+    '             而我们整套工具都是 function，所以只能走它独立的 Search 接口 → 本地 web_search 工具
+    '   其它（OpenAI、中转站、Ollama）：不加任何东西，保持原样
+
+    ''' <summary>按接口地址 / 模型名认这家自带哪种服务端联网能力。</summary>
+    Private Function SearchProvider() As String
+        ' 本地模型（Ollama / LM Studio）没有任何服务端联网能力，别把 qwen 那套参数发过去
+        If IsLocalEndpoint() Then Return "none"
+        Dim B = If(BaseUrl, "").Trim().ToLowerInvariant()
+        Dim M = If(ModelName, "").Trim().ToLowerInvariant()
+        If B.Contains("bigmodel.cn") OrElse B.Contains("open.bigmodel") OrElse B.Contains("api.z.ai") Then Return "glm"
+        If B.Contains("moonshot") OrElse B.Contains("kimi.com") OrElse B.Contains("api.kimi") Then Return "kimi"
+        If B.Contains("dashscope") OrElse B.Contains("aliyuncs") Then Return "qwen"
+        If B.Contains("deepseek") Then Return "deepseek"
+        ' 地址是企业网关 / 中转站时，靠模型名兜底
+        If M.StartsWith("glm") OrElse M.StartsWith("chatglm") Then Return "glm"
+        If M.StartsWith("kimi") OrElse M.StartsWith("moonshot") Then Return "kimi"
+        If M.StartsWith("qwen") OrElse M.StartsWith("qwq") Then Return "qwen"
+        If M.StartsWith("deepseek") Then Return "deepseek"
+        Return "none"
+    End Function
+
+    ''' <summary>要追加进 tools 数组的服务端联网工具；Nothing 表示这家不适用。</summary>
+    Private Function ServerSearchToolJson() As String
+        If Not WebSearchOn OrElse ServerSearchBroken Then Return Nothing
+        Select Case SearchProvider()
+            Case "glm"
+                Return "{""type"":""web_search"",""web_search"":{""enable"":true,""search_result"":true}}"
+            Case "kimi"
+                Return "{""type"":""builtin_function"",""function"":{""name"":""$web_search""}}"
+            Case Else
+                ' DeepSeek 的服务端工具不能与 function tools 共存，走本地 web_search 工具
+                Return Nothing
+        End Select
+    End Function
+
+    ''' <summary>顶层参数形式的联网开关（Qwen 的 enable_search，带前导逗号）。</summary>
+    Private Function ServerSearchTopJson() As String
+        If Not WebSearchOn OrElse ServerSearchBroken Then Return Nothing
+        If SearchProvider() = "qwen" Then Return "," & JsonStr("enable_search") & ":true"
+        Return Nothing
+    End Function
+
+    ''' <summary>DeepSeek 官方 Search 接口地址；非官方站点返回空串（中转站一般不转发这个路径）。</summary>
+    Private Function SearchEndpoint() As String
+        Dim B = If(BaseUrl, "").Trim().TrimEnd(Convert.ToChar("/"))
+        If B.Length = 0 Then B = "https://api.deepseek.com"
+        Dim L = B.ToLowerInvariant()
+        If Not (L.Contains("api.deepseek.com") OrElse L.StartsWith("https://deepseek.com")) Then Return ""
+        If L.EndsWith("/tools/search") Then Return B
+        If L.EndsWith("/v1") Then Return B & "/tools/search"
+        Return B & "/v1/tools/search"
+    End Function
+
+    ''' <summary>本地 web_search 工具：只在 DeepSeek 官方站给（靠服务商搜索接口，不是抓网页）。</summary>
+    Private Function LocalSearchToolJson() As String
+        If Not WebSearchOn Then Return Nothing
+        If SearchProvider() <> "deepseek" OrElse SearchEndpoint().Length = 0 Then Return Nothing
+        Return ToolDef2("web_search",
+                        "联网搜索（DeepSeek 官方搜索接口，按次计费）。返回若干条结果的标题、链接、摘要和发布时间。" &
+                        "问「最近 / 最新 / 现在怎么样」「有没有人做过」「某个模组最近更新了什么」这类训练数据覆盖不到的问题时用它；" &
+                        "已知具体网址要看正文，用 fetch_url。",
+                        "{""type"":""object"",""properties"":{" &
+                        """query"":{""type"":""string"",""description"":""搜索词，1~128 字，可用 site: / after: / lang: 等语法""}," &
+                        """count"":{""type"":""integer"",""description"":""返回条数，默认 6，最多 10""}},""required"":[""query""]}")
     End Function
 
     ' ==================== 多会话存储 ====================
@@ -1240,6 +1348,15 @@ Public Class AiPlusPlugin
                 .DefaultValue = 50,
                 .MinValue = 5,
                 .MaxValue = 500
+            },
+            New PCL.PluginSetting With {
+                .Key = "webSearch",
+                .Title = "模型自带联网搜索",
+                .Description = "开启后，按接口地址自动选用服务商自己的联网能力：GLM 用 web_search、Kimi 用 $web_search、" &
+                               "DeepSeek 用官方 Search 接口（5 元 / 千次，和模型共用同一个 Key）、Qwen 用 enable_search。" &
+                               "搜索结果由服务商在服务端检索，不经过本插件；接口不认这个参数时会自动降级成普通模式。",
+                .SettingType = PCL.PluginSettingType.Boolean,
+                .DefaultValue = True
             }
         }
     End Function
@@ -2001,7 +2118,26 @@ Public Class AiPlusPlugin
                              Dim Choice As String = "auto"
                              If ForceTool AndAlso Rounds = 0 Then Choice = "required"
                              Dim Body As String = BuildRequestJson(Extra, Choice)
-                             Await StreamChatAsync(Body, Target, Tok).ConfigureAwait(False)
+                             Dim SearchRejected As Boolean = False
+                             Try
+                                 Await StreamChatAsync(Body, Target, Tok).ConfigureAwait(False)
+                             Catch ex As OperationCanceledException
+                                 Throw
+                             Catch ex As Exception
+                                 ' 这家接口 / 中转站不认服务端联网工具：先不往上抛，摘掉工具重发一次，
+                                 ' 免得整个对话因为一个可选的联网开关直接失败
+                                 If ServerSearchInjected AndAlso Not ServerSearchBroken AndAlso LooksLikeSearchReject(ex.Message) Then
+                                     ServerSearchBroken = True
+                                     SearchRejected = True
+                                 Else
+                                     Throw
+                                 End If
+                             End Try
+                             If SearchRejected Then
+                                 If Host IsNot Nothing Then Host.Hint("这个接口不认模型自带联网，已切回普通模式")
+                                 Body = BuildRequestJson(Extra, Choice)
+                                 Await StreamChatAsync(Body, Target, Tok).ConfigureAwait(False)
+                             End If
                              If ToolCalls.Count = 0 Then Exit Do
 
                              Rounds += 1
@@ -2030,9 +2166,18 @@ Public Class AiPlusPlugin
 
                              Extra.Add(ToolCallsMessageJson())
                              For Each Tc In ToolCalls
-                                 Dim R As String = ExecTool(Tc.Name, Tc.Args.ToString())
-                                 ToolsUsed += 1
-                                 If Host IsNot Nothing Then Host.LogInfo("AI 工具 " & Tc.Name & " → " & Shorten(R, 140))
+                                 Dim R As String
+                                 If String.Equals(Tc.Name, "$web_search", StringComparison.OrdinalIgnoreCase) Then
+                                     ' Kimi 的 builtin_function：客户端只把参数原样回传，检索由 Moonshot 服务端完成。
+                                     ' 这里千万不能当成普通工具去执行——本地没有、也不该有搜索实现。
+                                     R = Tc.Args.ToString()
+                                     ToolsUsed += 1
+                                     If Host IsNot Nothing Then Host.LogInfo("AI 服务端联网 → " & Shorten(R, 120))
+                                 Else
+                                     R = ExecTool(Tc.Name, Tc.Args.ToString())
+                                     ToolsUsed += 1
+                                     If Host IsNot Nothing Then Host.LogInfo("AI 工具 " & Tc.Name & " → " & Shorten(R, 140))
+                                 End If
                                  Extra.Add(ToolResultMessageJson(Tc.Id, R))
                              Next
                              FlushUi()
@@ -2423,6 +2568,10 @@ Public Class AiPlusPlugin
         Sb.Append(",").Append(JsonStr("temperature")).Append(":0.3")
         Sb.Append(",").Append(JsonStr("tools")).Append(":").Append(ToolsJson())
         Sb.Append(",").Append(JsonStr("tool_choice")).Append(":").Append(JsonStr(ToolChoice))
+        Dim TopTxt As String = ServerSearchTopJson()
+        If TopTxt IsNot Nothing Then Sb.Append(TopTxt)
+        ' 记下这次带没带服务端联网工具：接口不认时要靠它决定降级重试
+        ServerSearchInjected = (ServerSearchToolJson() IsNot Nothing) OrElse (ServerSearchTopJson() IsNot Nothing)
         Sb.Append(",").Append(JsonStr("messages")).Append(":[")
 
         Dim Src As New List(Of ChatMessage)
@@ -2455,6 +2604,19 @@ Public Class AiPlusPlugin
 
         Sb.Append("]}")
         Return Sb.ToString()
+    End Function
+
+    ''' <summary>
+    ''' 接口拒绝「服务端联网工具」时的典型报错：4xx 且 body 里提到 tool / unknown / unsupported / invalid。
+    ''' 宁可只在这种情况降级——正常 429、超时不该把联网功能永久关掉。
+    ''' </summary>
+    Private Function LooksLikeSearchReject(Msg As String) As Boolean
+        If String.IsNullOrEmpty(Msg) Then Return False
+        If Msg.IndexOf("HTTP 400", StringComparison.OrdinalIgnoreCase) < 0 AndAlso
+           Msg.IndexOf("HTTP 422", StringComparison.OrdinalIgnoreCase) < 0 Then Return False
+        Dim L As String = Msg.ToLowerInvariant()
+        Return L.Contains("tool") OrElse L.Contains("unknown") OrElse L.Contains("unsupported") OrElse
+               L.Contains("invalid") OrElse L.Contains("web_search") OrElse L.Contains("not support")
     End Function
 
     ''' <summary>给模型的工具清单（OpenAI 兼容 function calling）。</summary>
@@ -2602,8 +2764,16 @@ Public Class AiPlusPlugin
             ToolDef2("read_instance_file",
                      "读当前实例目录里的文本文件（options.txt、config\*.toml、saves 里的 level.dat 不行，但 .snbt/.json 可以）。" &
                      "path 留空则返回实例目录概览（有哪些文件、config 里几项、有几个存档）。只能读，不能写，不能越出实例目录。",
-                     "{""type"":""object"",""properties"":{""path"":{""type"":""string"",""description"":""相对实例目录的路径，如 options.txt / config\xxx-common.toml；留空看概览""}}}") & "]"
-        Return S
+                     "{""type"":""object"",""properties"":{""path"":{""type"":""string"",""description"":""相对实例目录的路径，如 options.txt / config/xxx-common.toml；留空看概览""}}}")
+
+        ' 服务端联网工具（GLM / Kimi）与本地搜索工具（DeepSeek）都拼在最后
+        Dim Tail As New StringBuilder()
+        Dim Srv As String = ServerSearchToolJson()
+        If Srv IsNot Nothing Then Tail.Append(",").Append(Srv)
+        Dim Loc As String = LocalSearchToolJson()
+        If Loc IsNot Nothing Then Tail.Append(",").Append(Loc)
+        If Tail.Length > 0 Then S = S & Tail.ToString()
+        Return S & "]"
     End Function
 
     Private Function ToolDef(Name As String, Desc As String, Params As String) As String
@@ -2702,6 +2872,8 @@ Public Class AiPlusPlugin
             If Id IsNot Nothing AndAlso Id.Length > 0 Then Tc.Id = Id
             Dim Nm As String = JsonStringField(Seg, "name")
             If Nm IsNot Nothing AndAlso Nm.Length > 0 Then Tc.Name = Nm
+            Dim Kd As String = JsonStringField(Seg, "type")
+            If Kd IsNot Nothing AndAlso Kd.Length > 0 Then Tc.Kind = Kd
             Dim Aa As String = JsonStringField(Seg, "arguments")
             If Aa IsNot Nothing Then Tc.Args.Append(Aa)
 
@@ -2719,7 +2891,7 @@ Public Class AiPlusPlugin
         For Each Tc In ToolCalls
             If Not First Then Sb.Append(",")
             Sb.Append("{").Append(JsonStr("id")).Append(":").Append(JsonStr(Tc.Id))
-            Sb.Append(",").Append(JsonStr("type")).Append(":").Append(JsonStr("function"))
+            Sb.Append(",").Append(JsonStr("type")).Append(":").Append(JsonStr(If(String.IsNullOrEmpty(Tc.Kind), "function", Tc.Kind)))
             Sb.Append(",").Append(JsonStr("function")).Append(":{")
             Sb.Append(JsonStr("name")).Append(":").Append(JsonStr(Tc.Name))
             Sb.Append(",").Append(JsonStr("arguments")).Append(":").Append(JsonStr(Tc.Args.ToString()))
@@ -2861,6 +3033,8 @@ Public Class AiPlusPlugin
                     Return "agent.md 里的约定：" & Environment.NewLine & Doc
                 Case "remember_convention"
                     Return AppendAgentLine(JsonStringField(ArgsJson, "text"))
+                Case "web_search"
+                    Return ToolWebSearch(ArgsJson)
                 Case "fetch_url"
                     Return ToolFetchUrl(ArgsJson)
                 Case "mods_scan"
@@ -3190,6 +3364,101 @@ Public Class AiPlusPlugin
                              "----------------------------------------" & Environment.NewLine
         If Total > Max Then Text = Text.Substring(0, Max) & Environment.NewLine & "……（后面还有 " & (Total - Max) & " 字）"
         Return Head & Text
+    End Function
+
+    ' ---- 搜索 ----
+
+    ''' <summary>
+    ''' DeepSeek 官方 Search 接口（/v1/tools/search）：这是搜索，不是抓网页。
+    ''' 5 元 / 千次成功请求，与模型共用同一个 Key；返回标题、链接、长摘要、发布时间。
+    ''' （DeepSeek 的服务端联网工具不许和自定义 function 混用，所以只能走这个独立接口。）
+    ''' </summary>
+    Private Function ToolWebSearch(ArgsJson As String) As String
+        Dim Q As String = If(JsonStringField(ArgsJson, "query"), "").Trim()
+        If Q.Length = 0 Then Return "缺少 query 参数。"
+        If Q.Length > 128 Then Q = Q.Substring(0, 128)
+        Dim N As Integer = JsonIntField(ArgsJson, "count", 6)
+        If N < 1 Then N = 1
+        If N > 10 Then N = 10
+
+        Dim U As String = SearchEndpoint()
+        If U.Length = 0 Then
+            Return "当前接口地址不是 DeepSeek 官方站点，没有可用的搜索接口（中转站一般不会转发 /v1/tools/search）。" &
+                   "已知网址就用 fetch_url 抓正文；要搜索请把「接口地址」改成 https://api.deepseek.com。"
+        End If
+        If ApiKey.Length = 0 Then Return "没有配置 API Key，调不了搜索接口。"
+
+        Dim Body As String = "{" & JsonStr("query") & ":" & JsonStr(Q) & "," &
+                             JsonStr("count") & ":" & N.ToString() & "," &
+                             JsonStr("need_content") & ":false}"
+        Dim Resp As String = ""
+        Try
+            Dim Req As New HttpRequestMessage(HttpMethod.Post, U)
+            Req.Content = New StringContent(Body, Encoding.UTF8, "application/json")
+            Req.Headers.TryAddWithoutValidation("Authorization", "Bearer " & ApiKey)
+            Using Tcs As New CancellationTokenSource(TimeSpan.FromSeconds(25))
+                Dim Rs = Client.SendAsync(Req, Tcs.Token).GetAwaiter().GetResult()
+                Resp = Rs.Content.ReadAsStringAsync().GetAwaiter().GetResult()
+                If Not Rs.IsSuccessStatusCode Then
+                    Dim Tip As String = ""
+                    Select Case CInt(Rs.StatusCode)
+                        Case 401, 403
+                            Tip = "（鉴权失败：检查 API Key。）"
+                        Case 402
+                            Tip = "（账号余额不足。）"
+                        Case 429
+                            Tip = "（QPS 超限，等几秒再试。）"
+                        Case 404
+                            Tip = "（这个地址没有搜索接口，可能配的是中转站。）"
+                    End Select
+                    Return "搜索失败：HTTP " & CInt(Rs.StatusCode) & " " & Shorten(Resp, 200) & Tip
+                End If
+            End Using
+        Catch ex As Exception
+            Dim T As Exception = If(ex.InnerException IsNot Nothing, ex.InnerException, ex)
+            Return "搜索请求失败：" & T.Message & Environment.NewLine &
+                   "（只有 api.deepseek.com 官方站开放 /v1/tools/search；中转站请改用 fetch_url。）"
+        End Try
+
+        Dim D As Dictionary(Of String, Object) = JsonObjectOf(Resp)
+        If D Is Nothing Then Return "搜索返回了无法解析的内容：" & Shorten(Resp, 220)
+        Dim Arr As Object() = JArr(D, "results")
+        If Arr Is Nothing OrElse Arr.Length = 0 Then
+            Return "没搜到结果：" & Q & "。可以换关键词，或去掉过于严格的 site: / after: / lang: 限制。"
+        End If
+
+        Dim Sb As New StringBuilder()
+        Sb.Append("搜索「").Append(Q).Append("」共 ").Append(Arr.Length).Append(" 条（按相关性排序）：").Append(Environment.NewLine)
+        Dim Idx As Integer = 0
+        For Each Item In Arr
+            Dim R As Dictionary(Of String, Object) = TryCast(Item, Dictionary(Of String, Object))
+            If R Is Nothing Then Continue For
+            Idx += 1
+            Dim Ttl As String = DictStr(R, "title")
+            Dim Lnk As String = DictStr(R, "url")
+            Dim Sum As String = DictStr(R, "summary")
+            If Sum.Length = 0 Then Sum = DictStr(R, "snippet")
+            Dim Dt As String = DictStr(R, "date")
+            Dim Sn As String = DictStr(R, "site_name")
+
+            Sb.Append(Idx.ToString()).Append(". ").Append(If(Ttl.Length > 0, Ttl, Lnk))
+            If Sn.Length > 0 Then Sb.Append("（").Append(Sn).Append("）")
+            If Dt.Length >= 10 Then Sb.Append(" ").Append(Dt.Substring(0, 10))
+            Sb.Append(Environment.NewLine).Append("   ").Append(Lnk).Append(Environment.NewLine)
+            If Sum.Length > 0 Then
+                If Sum.Length > 420 Then Sum = Sum.Substring(0, 420) & "…"
+                Sb.Append("   ").Append(Sum).Append(Environment.NewLine)
+            End If
+        Next
+        Sb.Append("（以上是搜索结果；回答时把链接带上，需要某条正文再用 fetch_url 抓它的 url。）")
+        Return Sb.ToString()
+    End Function
+
+    Private Function DictStr(D As Dictionary(Of String, Object), K As String) As String
+        If D Is Nothing Then Return ""
+        Dim V As Object = Nothing
+        If Not D.TryGetValue(K, V) OrElse V Is Nothing Then Return ""
+        Return Convert.ToString(V)
     End Function
 
     ' ---- mods 目录的 jar 元数据 ----

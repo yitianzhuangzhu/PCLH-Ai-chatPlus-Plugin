@@ -4,23 +4,28 @@
 
 和纯聊天插件的区别：它能**真的操作启动器**——装原版 / 加载器、下载并安装模组、装整合包（新建实例、带封面和默认名字）、启动游戏、改参数、开关模组、读游戏日志。所有改动都通过宿主公开 API 完成，不改启动器本体。
 
-当前版本：**0.5.4**
+当前版本：**0.5.5**
 
 ## 安装
 
 **要求：支持插件 API v10 的 PCL Harness（3.10.x 起）。**
 
-方式一（推荐）：到 [Releases](https://github.com/yitianzhuangzhu/PCLH-Ai-chatPlus-Plugin/releases/latest) 下载 `aiplus-0.5.4.pclplugin`，启动器 →「插件」页 →「导入插件…」选中它，启用时确认一次权限弹窗。仓库里的 [`dist/`](dist) 与 Release 附件是同一个文件。
+方式一（推荐）：到 [Releases](https://github.com/yitianzhuangzhu/PCLH-Ai-chatPlus-Plugin/releases/latest) 下载 `aiplus-0.5.5.pclplugin`，启动器 →「插件」页 →「导入插件…」选中它，启用时确认一次权限弹窗。仓库里的 [`dist/`](dist) 与 Release 附件是同一个文件。
 
 方式二（手动）：把 `main` 文件夹改名为 `aiplus`，放进 `<启动器目录>\PCLHarness\Plugins\`，重启启动器（或插件页「重新扫描」）。
 
 装好后到「启动」页右侧卡片点「配置」填接口、密钥、模型：
 
-| 服务 | 接口地址 | 模型名 |
-| --- | --- | --- |
-| DeepSeek | `https://api.deepseek.com` | `deepseek-chat` |
-| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` 等 |
-| 本地 Ollama | `http://127.0.0.1:11434/v1` | `qwen2.5` 等（无需密钥） |
+| 服务 | 接口地址 | 模型名 | 自带联网 |
+| --- | --- | --- | --- |
+| DeepSeek | `https://api.deepseek.com` | `deepseek-chat` | 插件内置 `web_search` 工具，走 DeepSeek 官方 Search 接口 |
+| 智谱 GLM | `https://open.bigmodel.cn/api/paas/v4` | `glm-4.5` 等 | 服务端 `web_search`，模型自己判断要不要搜 |
+| Kimi | `https://api.moonshot.cn/v1` | `kimi-k2` 等 | 服务端 `$web_search`，按次计费 |
+| 通义千问 | `https://dashscope.aliyuncs.com/compatible-mode/v1` | `qwen-plus` 等 | 顶层 `enable_search` |
+| OpenAI | `https://api.openai.com/v1` | `gpt-4o-mini` 等 | 不加参数，靠 `fetch_url` 读指定页面 |
+| 本地 Ollama | `http://127.0.0.1:11434/v1` | `qwen2.5` 等（无需密钥） | 无（本地模型没有服务端检索） |
+
+「自带联网」由「模型自带联网搜索」开关控制（默认开）。插件按接口地址自动识别服务商，不需要手选；接口不认这个参数时会自动摘掉重发一次，只提示一句，不会让整轮对话失败。
 
 ## 功能
 
@@ -31,6 +36,7 @@
 - **agent.md 长期约定**：`data\agent.md` 是一份你自己写的 Markdown 规矩，每次请求都会追加到系统提示词后面。改完保存立即生效（按修改时间热加载），插件升级不会覆盖；首次运行自动生成带说明的模板。对话里 `/agent` 查看、`/agent <一句话>` 追加、`/agent reset` 重建；也可以直接跟 AI 说「记住，以后装光影前先问我」，它会用 `remember_convention` 自己写进去，跨会话生效。
 - **上下文可视化**：状态行显示 `上下文 ≈ N / 64.0k (x%) · 上次 ↑输入 ↓输出`，底部有用量条。
 - **工具调用**：34 个工具，模型自己决定调用；单次提问最多 12 轮工具往返，耗尽时强制收尾作答而不是硬掐断。
+- **服务商自带联网**：按接口自动选 GLM 的 `web_search`、Kimi 的 `$web_search`、Qwen 的 `enable_search`；DeepSeek 的服务端工具不能和自定义 function 混用，所以改用它独立的 Search 接口（本地 `web_search` 工具，5 元 / 千次，和模型共用一个 Key）。搜索结果由服务商检索，比抓网页更省 token、也带来源。
 - **会查资料**：`fetch_url` 抓网页正文（去标签、解实体，默认 6000 字），走宿主 `net.hosts` 白名单，名单外的站会弹窗问你要不要放行——所以能读 Modrinth 项目页、GitHub 的 README / issue、MC wiki。
 - **会看现场**：`mods_scan` 打开 mods 里每个 jar 读 `fabric.mod.json` / `mods.toml` / `mcmod.info`，拿到真实 modid、版本和**前置依赖**，并检查「缺前置」「同一 modid 装了多份」；`diagnose_crash` 一次凑齐实例信息 + 崩溃报告 + 日志尾部 + mods 清单；`read_instance_file` 读 `options.txt` / `config\*.toml`（只读、限 512 KB、不能越出实例目录）。
 - **真下载、真安装**：内容文件由宿主直接写进实例并做 SHA-1 校验，任务进启器「任务管理」；整合包交给宿主安装流程，和用户把包拖进启动器完全一样。
@@ -70,7 +76,8 @@
 | | `open_download_page` | 打开启动器下载页 |
 | 约定 | `read_conventions` | 读 `agent.md` 里的长期约定（不凭印象答） |
 | | `remember_convention` | 把一条规矩写进 `agent.md`，跨会话生效 |
-| 查资料 | `fetch_url` | 抓网页 / JSON 正文给模型读（白名单外弹窗授权） |
+| 查资料 | `web_search` | 联网搜索（仅 DeepSeek 官方站；返回标题 / 链接 / 摘要 / 日期） |
+| | `fetch_url` | 抓网页 / JSON 正文给模型读（白名单外弹窗授权） |
 | 诊断 | `mods_scan` | 读 jar 里的真实 modid / 版本 / 前置依赖，查缺失与重复 |
 | | `diagnose_crash` | 实例 + 崩溃报告 + 日志尾部 + mods 清单，一次给全 |
 | | `read_instance_file` | 读实例里的文本文件；path 留空看目录概览 |
