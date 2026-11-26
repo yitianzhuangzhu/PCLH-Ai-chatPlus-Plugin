@@ -9,8 +9,11 @@ Imports System
 Imports System.Collections
 Imports System.Collections.Generic
 Imports System.IO
+Imports System.IO.Compression
+Imports System.Net
 Imports System.Net.Http
 Imports System.Text
+Imports System.Text.RegularExpressions
 Imports System.Threading
 Imports System.Threading.Tasks
 Imports System.Web.Script.Serialization
@@ -103,7 +106,7 @@ Public Class AiPlusPlugin
     ''' <summary>CurseForge API Key（加密存储）。为空时按环境变量 / PCL\Secrets.json 兜底。</summary>
     Private CfKey As String = ""
 
-    Private Const PromptVer As Integer = 9
+    Private Const PromptVer As Integer = 10
 
     Private Function DefaultSysPrompt() As String
         Return "你是 PCL Harness 启动器里的助手。回答简洁、直接，用中文；不确定就直说不确定，不要编。" & Environment.NewLine & Environment.NewLine &
@@ -139,9 +142,17 @@ Public Class AiPlusPlugin
             "· 安装是后台任务：工具返回「已开始」就立刻把关键信息（版本名、目标目录、去右下角任务栏看进度）告诉用户，然后结束这一轮。不要紧接着调 list_instances 去验证——装完之前那个版本一定不在列表里；" & Environment.NewLine &
             "· 只有在用户后来问「装好了吗」时，才 list_instances 查一次；查到就报查到，没查到就说任务栏可能还在跑或失败了、让他看日志，不要连查好几遍。" & Environment.NewLine &
             Environment.NewLine &
+            "查资料与诊断的做法：" & Environment.NewLine &
+            "· 要回答「这个模组是干嘛的 / 支不支持某个版本 / 有什么前置」，先 search_modrinth，需要细节再 fetch_url 抓项目页或 Modrinth 接口，别凭训练记忆断言；" & Environment.NewLine &
+            "· 用户说「崩了 / 起不来 / 报错」时，先 diagnose_crash 把崩溃报告和日志拿全再判断；报告里没有的结论不要编，也不知道就说不知道，并指出下一步查哪里；" & Environment.NewLine &
+            "· 问「我装了哪些 mod / 有没有冲突 / 缺什么前置」时用 mods_scan（读 jar 里的真实 modid 和依赖声明），不要拿文件名猜版本；" & Environment.NewLine &
+            "· 要确认画质、内存、某个 mod 的配置时，用 read_instance_file 读 options.txt / config 下的原文，照着实际值给建议；" & Environment.NewLine &
+            "· fetch_url 只能抓白名单里的站（Modrinth、CurseForge、GitHub、Mojang、镜像），名单外的会弹窗问用户；被拒绝就换站或直接说明拿不到，不要反复抓同一个地址；" & Environment.NewLine &
+            "· 联网结果和训练记忆要分清楚：说「我查到的」时必须有对应工具返回，否则就说「我印象里」，并且提醒可能过时。" & Environment.NewLine &
+            Environment.NewLine &
             "能力边界（很重要）：" & Environment.NewLine &
-            "· 你没有任何执行代码或命令行的手段，也不能读写任意路径的文件；" & Environment.NewLine &
-            "· 你自己能直接写的只有本插件的 data 目录（notes 与 downloads）；模组 / 资源包这类内容是交给启动器写进当前实例的（宿主负责下载、校验、进度），你不能直接编辑实例里的文件内容，也不能改配置或删文件；" & Environment.NewLine &
+            "· 你没有任何执行代码或命令行的手段，也不能读任意路径的文件：能读的只有当前实例目录里的文本文件（read_instance_file）、宿主提供的 logs / crash-reports，以及插件自己的 data 目录；" & Environment.NewLine &
+            "· 你自己能直接写的只有本插件的 data 目录（notes、downloads、agent.md）；模组 / 资源包这类内容是交给启动器写进当前实例的（宿主负责下载、校验、进度），你不能直接编辑实例里的文件内容，也不能改配置或删文件——read_instance_file 只给读，读到什么就照着说什么；" & Environment.NewLine &
             "· 改动类操作（启动游戏、切实例、追加参数、开关插件、启用禁用模组、下载并安装内容）只在用户明确要求时做，做完把工具原文回给用户；" & Environment.NewLine &
             "· 开关插件会让启动器重载插件、可能打断本次对话，操作前先说清后果；不能操作本插件自己；" & Environment.NewLine &
             "· 启用/禁用模组只是把文件名改成 .disabled，可逆；不要改动文件内容；" & Environment.NewLine &
@@ -2573,7 +2584,25 @@ Public Class AiPlusPlugin
             ToolDef2("remember_convention",
                      "把一条长期约定写进 agent.md（跨会话、跨重启都有效）。只在用户明确要求「记住 / 以后都这样 / 下次别再问」时调用；" &
                      "写完把这条复述给用户。写的是对以后行为的要求，不要拿它存普通笔记（存笔记用 write_note）。",
-                     "{""type"":""object"",""properties"":{""text"":{""type"":""string"",""description"":""要记住的一条规矩，一句话，例如：装光影前先把候选念给我确认""}},""required"":[""text""]}") & "]"
+                     "{""type"":""object"",""properties"":{""text"":{""type"":""string"",""description"":""要记住的一条规矩，一句话，例如：装光影前先把候选念给我确认""}},""required"":[""text""]}") & "," &
+            ToolDef2("fetch_url",
+                     "抓一个网页或 JSON 接口的正文来读（不是给用户开浏览器）。适合查模组说明、MC wiki、GitHub 的 README / issue、版本清单。" &
+                     "返回的是去标签后的纯文本，默认只给前 6000 字。白名单外的站会弹窗问用户要不要放行，被拒绝就换站，不要反复试。",
+                     "{""type"":""object"",""properties"":{" &
+                     """url"":{""type"":""string"",""description"":""http/https 完整地址""}," &
+                     """max_chars"":{""type"":""integer"",""description"":""最多返回多少字，默认 6000，最大 15000""}},""required"":[""url""]}") & "," &
+            ToolDef2("mods_scan",
+                     "扫描当前实例 mods 目录里每个 jar 的元数据：真实 modid、名称、版本、加载器、声明的前置依赖；" &
+                     "并检查「缺前置」和「同一个 modid 装了多份」。用户问装了哪些 mod、有没有冲突、缺什么前置、为什么崩的时候用这个，比 list_mods 详细得多。",
+                     "{""type"":""object"",""properties"":{},""required"":[]}") & "," &
+            ToolDef2("diagnose_crash",
+                     "一次性收集诊断材料：实例信息、最新崩溃报告（前 160 行）、日志尾部 120 行、mods 数量与清单。" &
+                     "用户说「崩了 / 起不来 / 报错」时先调这个，再基于原文分析，不要凭空猜原因。",
+                     "{""type"":""object"",""properties"":{},""required"":[]}") & "," &
+            ToolDef2("read_instance_file",
+                     "读当前实例目录里的文本文件（options.txt、config\*.toml、saves 里的 level.dat 不行，但 .snbt/.json 可以）。" &
+                     "path 留空则返回实例目录概览（有哪些文件、config 里几项、有几个存档）。只能读，不能写，不能越出实例目录。",
+                     "{""type"":""object"",""properties"":{""path"":{""type"":""string"",""description"":""相对实例目录的路径，如 options.txt / config\xxx-common.toml；留空看概览""}}}") & "]"
         Return S
     End Function
 
@@ -2832,6 +2861,14 @@ Public Class AiPlusPlugin
                     Return "agent.md 里的约定：" & Environment.NewLine & Doc
                 Case "remember_convention"
                     Return AppendAgentLine(JsonStringField(ArgsJson, "text"))
+                Case "fetch_url"
+                    Return ToolFetchUrl(ArgsJson)
+                Case "mods_scan"
+                    Return ToolModsScan(ArgsJson)
+                Case "diagnose_crash"
+                    Return ToolDiagnose(ArgsJson)
+                Case "read_instance_file"
+                    Return ToolReadInstanceFile(ArgsJson)
                 Case Else
                     Return "未知工具：" & Name
             End Select
@@ -3080,6 +3117,476 @@ Public Class AiPlusPlugin
         Catch ex As Exception
             Dim T As Exception = If(ex.InnerException IsNot Nothing, ex.InnerException, ex)
             Return "读游戏日志失败：" & T.Message
+        End Try
+    End Function
+
+    ' ==================== 联网抓取 / 实例诊断 ====================
+
+    ''' <summary>当前选中且目录可用的实例；没有就返回 Nothing。</summary>
+    Private Function TryInstance() As PCL.PluginInstanceSnapshot
+        Try
+            Dim I = Host.InstanceInfo
+            If I IsNot Nothing AndAlso I.Available AndAlso Not String.IsNullOrWhiteSpace(I.PathIndie) AndAlso Directory.Exists(I.PathIndie) Then Return I
+        Catch ex As Exception
+        End Try
+        Return Nothing
+    End Function
+
+    ''' <summary>把 HTML 粗加工成可读文本：去脚本样式、块级标签换行、去标签、解实体、压空行。</summary>
+    Private Function HtmlToText(Html As String) As String
+        Dim S As String = If(Html, "")
+        Try
+            S = Regex.Replace(S, "<!--.*?-->", "", RegexOptions.Singleline)
+            S = Regex.Replace(S, "<script\b.*?</script>", "", RegexOptions.Singleline Or RegexOptions.IgnoreCase)
+            S = Regex.Replace(S, "<style\b.*?</style>", "", RegexOptions.Singleline Or RegexOptions.IgnoreCase)
+            S = Regex.Replace(S, "<(br|/p|/div|/li|/tr|/h[1-6]|/section|/article|/table|/blockquote|/title|/head|/ul|/ol|/pre|/dd|/dt|/header|/footer|/nav|/form)\b[^>]*>", vbLf, RegexOptions.IgnoreCase)
+            S = Regex.Replace(S, "<td\b[^>]*>", " | ", RegexOptions.IgnoreCase)
+            S = Regex.Replace(S, "<[^>]+>", "")
+            S = WebUtility.HtmlDecode(S)
+            S = S.Replace(ChrW(&HA0), " "c)
+            S = Regex.Replace(S, "[ \t]+", " ")
+            S = Regex.Replace(S, " *\r?\n *", vbCrLf)
+            S = Regex.Replace(S, "(?:\r?\n){3,}", vbCrLf & vbCrLf)
+        Catch ex As Exception
+            Return S
+        End Try
+        Return S.Trim()
+    End Function
+
+    ''' <summary>GET 一个网址并返回可读正文。走 Host.HttpGetString：白名单内直连，名单外在 net.dynamic 下向用户申请。</summary>
+    Private Function ToolFetchUrl(ArgsJson As String) As String
+        Dim U As String = If(JsonStringField(ArgsJson, "url"), "").Trim()
+        If U.Length = 0 Then Return "缺少 url 参数。"
+        If Not U.StartsWith("http://", StringComparison.OrdinalIgnoreCase) AndAlso
+           Not U.StartsWith("https://", StringComparison.OrdinalIgnoreCase) Then
+            Return "只支持 http / https 链接：" & U
+        End If
+        Dim Max As Integer = JsonIntField(ArgsJson, "max_chars", 6000)
+        If Max < 500 Then Max = 500
+        If Max > 15000 Then Max = 15000
+
+        Dim Raw As String
+        Try
+            Raw = Host.HttpGetString(U)
+        Catch ex As Exception
+            Dim T As Exception = If(ex.InnerException IsNot Nothing, ex.InnerException, ex)
+            If Host IsNot Nothing Then Host.LogWarn("fetch_url 失败（" & U & "）：" & T.Message)
+            Return "抓取失败：" & T.Message & Environment.NewLine &
+                   "常见原因：这个站不在插件白名单、并且用户拒绝了授权弹窗；或者站点超时 / 需要登录。可以换 Modrinth、CurseForge、GitHub、Mojang 这类已放行的站。" & Environment.NewLine &
+                   "（插件白名单：api.modrinth.com、cdn.modrinth.com、api.curseforge.com、*.forgecdn.net、mod.mcimirror.top、github.com、raw.githubusercontent.com、objects.githubusercontent.com、piston-meta/piston-data/launchermeta.mojang.com、bmclapi2.bangbang93.com）"
+        End Try
+        If Raw Is Nothing Then Raw = ""
+        If Raw.Trim().Length = 0 Then Return "抓到了空响应：" & U
+
+        Dim Trimmed As String = Raw.TrimStart()
+        Dim IsJsonTxt As Boolean = Trimmed.StartsWith("{") OrElse Trimmed.StartsWith("[")
+        Dim Text As String = If(IsJsonTxt, Raw, HtmlToText(Raw))
+        Dim Kind As String = If(IsJsonTxt, "JSON", "网页正文")
+
+        Dim Total As Integer = Text.Length
+        Dim Head As String = "已抓取 " & U & Environment.NewLine &
+                             "类型：" & Kind & "；" & Total & " 字" &
+                             If(Total > Max, "（只给前 " & Max & " 字，需要更多就加 max_chars）", "") & Environment.NewLine &
+                             "----------------------------------------" & Environment.NewLine
+        If Total > Max Then Text = Text.Substring(0, Max) & Environment.NewLine & "……（后面还有 " & (Total - Max) & " 字）"
+        Return Head & Text
+    End Function
+
+    ' ---- mods 目录的 jar 元数据 ----
+
+    Private Class JarMeta
+        Public FileName As String = ""
+        Public ModId As String = ""
+        Public ModName As String = ""
+        Public Version As String = ""
+        Public Loader As String = ""
+        Public Enabled As Boolean = True
+        Public Deps As New List(Of String)
+    End Class
+
+    ''' <summary>加载器自身的东西不算「缺前置」。</summary>
+    Private Function IsBaseDep(Id As String) As Boolean
+        Select Case If(Id, "").Trim().ToLowerInvariant()
+            Case "minecraft", "java", "fabricloader", "forge", "neoforge", "minecraft_forge"
+                Return True
+        End Select
+        Return False
+    End Function
+
+    Private Sub ParseTomlMeta(Txt As String, ByVal M As JarMeta)
+        Dim Section As String = ""
+        Dim GotId As Boolean = False
+        Dim PendingId As String = ""
+        Dim PendingMandatory As Boolean = True
+
+        Dim Flush As Action =
+            Sub()
+                If PendingId.Length > 0 AndAlso PendingMandatory AndAlso Not IsBaseDep(PendingId) Then
+                    If Not M.Deps.Contains(PendingId) Then M.Deps.Add(PendingId)
+                End If
+                PendingId = ""
+                PendingMandatory = True
+            End Sub
+
+        For Each Line0 In Txt.Replace(vbCrLf, vbLf).Split(CChar(vbLf))
+            Dim L As String = Line0.Trim()
+            If L.Length = 0 OrElse L.StartsWith("#") Then Continue For
+            If L.StartsWith("[[") Then
+                Flush()
+                Dim Sec As String = L.TrimStart("["c).TrimEnd("]"c).Trim()
+                If Sec.StartsWith("dependencies", StringComparison.OrdinalIgnoreCase) Then
+                    Section = "dep"
+                ElseIf Sec.Equals("mods", StringComparison.OrdinalIgnoreCase) Then
+                    Section = "mods"
+                Else
+                    Section = Sec
+                End If
+                Continue For
+            End If
+            Dim Eq As Integer = L.IndexOf("="c)
+            If Eq <= 0 Then Continue For
+            Dim Key As String = L.Substring(0, Eq).Trim()
+            Dim Val As String = L.Substring(Eq + 1).Trim().Trim(""""c).Trim()
+            If Section = "mods" Then
+                If Key = "modId" AndAlso Not GotId Then M.ModId = Val : GotId = True
+                If Key = "version" AndAlso M.Version.Length = 0 Then M.Version = Val
+                If Key = "displayName" AndAlso M.ModName.Length = 0 Then M.ModName = Val
+            ElseIf Section = "dep" Then
+                If Key = "modId" Then
+                    Flush()
+                    PendingId = Val
+                ElseIf Key = "mandatory" Then
+                    PendingMandatory = Val.Equals("true", StringComparison.OrdinalIgnoreCase)
+                End If
+            End If
+        Next
+        Flush()
+    End Sub
+
+    Private Sub ParseMcmodInfo(Txt As String, ByVal M As JarMeta)
+        Dim Arr = JsonArrayOf(Txt)
+        If Arr Is Nothing OrElse Arr.Length = 0 Then Return
+        Dim D = TryCast(Arr(0), Dictionary(Of String, Object))
+        If D Is Nothing Then Return
+        M.ModId = JStr(D, "modid")
+        M.ModName = JStr(D, "name")
+        M.Version = JStr(D, "version")
+    End Sub
+
+    ''' <summary>从 jar 里读 fabric.mod.json / mods.toml / mcmod.info，拿真实的 modid、版本和依赖。</summary>
+    Private Function ReadJarMeta(P As String) As JarMeta
+        Dim M As New JarMeta With {.FileName = Path.GetFileName(P)}
+        M.Enabled = Not M.FileName.EndsWith(".disabled", StringComparison.OrdinalIgnoreCase)
+        Try
+            Using Z As ZipArchive = ZipFile.OpenRead(P)
+                Dim FE = Z.GetEntry("fabric.mod.json")
+                If FE IsNot Nothing Then
+                    Using R As New StreamReader(FE.Open(), Encoding.UTF8)
+                        Dim D = JsonObjectOf(R.ReadToEnd())
+                        If D IsNot Nothing Then
+                            M.ModId = JStr(D, "id")
+                            M.Version = JStr(D, "version")
+                            M.ModName = JStr(D, "name")
+                            M.Loader = "fabric"
+                            Dim Dep As Dictionary(Of String, Object) = JSub(D, "depends")
+                            If Dep IsNot Nothing Then
+                                For Each K In Dep.Keys
+                                    Dim Ks As String = Convert.ToString(K).Trim().ToLowerInvariant()
+                                    If Ks.Length > 0 AndAlso Not IsBaseDep(Ks) AndAlso Not M.Deps.Contains(Ks) Then M.Deps.Add(Ks)
+                                Next
+                            End If
+                        End If
+                    End Using
+                End If
+
+                If String.IsNullOrWhiteSpace(M.ModId) Then
+                    Dim NE = Z.GetEntry("META-INF/neoforge.mods.toml")
+                    Dim IsNeo As Boolean = NE IsNot Nothing
+                    If NE Is Nothing Then NE = Z.GetEntry("META-INF/mods.toml")
+                    If NE IsNot Nothing Then
+                        Using R As New StreamReader(NE.Open(), Encoding.UTF8)
+                            ParseTomlMeta(R.ReadToEnd(), M)
+                        End Using
+                        M.Loader = If(IsNeo, "neoforge", "forge")
+                    End If
+                End If
+
+                If String.IsNullOrWhiteSpace(M.ModId) Then
+                    Dim ME0 = Z.GetEntry("mcmod.info")
+                    If ME0 IsNot Nothing Then
+                        Using R As New StreamReader(ME0.Open(), Encoding.UTF8)
+                            ParseMcmodInfo(R.ReadToEnd(), M)
+                        End Using
+                        If String.IsNullOrWhiteSpace(M.Loader) Then M.Loader = "forge"
+                    End If
+                End If
+            End Using
+        Catch ex As Exception
+            ' 坏 jar / 加密 / 非 zip：留空，不打断整轮扫描
+        End Try
+        Return M
+    End Function
+
+    ''' <summary>扫当前实例的 mods 目录，列出真实 modid / 版本 / 依赖，并检查缺前置与重复 modid。</summary>
+    Private Function ToolModsScan(ArgsJson As String) As String
+        Dim Inst = TryInstance()
+        If Inst Is Nothing Then Return "当前没有选中可用的实例（先用 list_instances / select_instance）。"
+        Dim Dir As String = Path.Combine(Inst.PathIndie, "mods")
+        If Not Directory.Exists(Dir) Then Return "实例「" & Inst.Name & "」没有 mods 目录：" & Dir
+
+        Dim All As String() = Directory.GetFiles(Dir, "*.jar*")
+        If All.Length = 0 Then Return "mods 目录是空的：" & Dir
+        Array.Sort(All, StringComparer.OrdinalIgnoreCase)
+
+        Dim Limit As Integer = If(All.Length > 250, 250, All.Length)
+        Dim Metas As New List(Of JarMeta)
+        For I As Integer = 0 To Limit - 1
+            Metas.Add(ReadJarMeta(All(I)))
+        Next
+
+        Dim Sb As New StringBuilder()
+        Dim Enabled As Integer = 0
+        For Each M In Metas
+            If M.Enabled Then Enabled += 1
+        Next
+        Sb.Append("实例「").Append(Inst.Name).Append("」的 mods：").Append(All.Length).Append(" 个文件（启用 ").Append(Enabled).Append(" / 禁用 ").Append(All.Length - Enabled).Append("）")
+        If All.Length > Limit Then Sb.Append("，只解析了前 ").Append(Limit).Append(" 个")
+        Sb.Append(Environment.NewLine).Append("----------------------------------------").Append(Environment.NewLine)
+
+        Dim ById As New Dictionary(Of String, List(Of String))(StringComparer.OrdinalIgnoreCase)
+        Dim NoMeta As New List(Of String)
+
+        For Each M In Metas
+            If String.IsNullOrWhiteSpace(M.ModId) Then
+                NoMeta.Add(M.FileName)
+            Else
+                If Not ById.ContainsKey(M.ModId) Then ById(M.ModId) = New List(Of String)
+                ById(M.ModId).Add(M.FileName)
+            End If
+        Next
+
+        Dim Idx As Integer = 0
+        For Each M In Metas
+            Idx += 1
+            Sb.Append(Idx.ToString().PadLeft(3)).Append(". ")
+            If Not M.Enabled Then Sb.Append("[禁用] ")
+            Sb.Append(M.FileName)
+            If M.ModId.Length > 0 Then
+                Sb.Append(Environment.NewLine).Append("      id=").Append(M.ModId)
+                If M.ModName.Length > 0 AndAlso Not String.Equals(M.ModName, M.ModId, StringComparison.OrdinalIgnoreCase) Then Sb.Append("  名称=").Append(M.ModName)
+                If M.Version.Length > 0 Then Sb.Append("  版本=").Append(M.Version)
+                If M.Loader.Length > 0 Then Sb.Append("  ").Append(M.Loader)
+                If M.Deps.Count > 0 Then Sb.Append(Environment.NewLine).Append("      需要：").Append(String.Join("、", M.Deps.ToArray()))
+            Else
+                Sb.Append("（读不到 modid：可能是资源包、坏包或非标准 jar）")
+            End If
+            Sb.Append(Environment.NewLine)
+            If Sb.Length > 10000 Then
+                Sb.Append("……（列表太长，先截断；剩下 ").Append(Metas.Count - Idx).Append(" 个）")
+                Exit For
+            End If
+        Next
+
+        ' 依赖检查：只比对本实例的 jar，所以「缺」就是真的没装
+        Dim Missing As New List(Of String)
+        For Each M In Metas
+            For Each D In M.Deps
+                If Not ById.ContainsKey(D) Then
+                    Dim Line As String = D & "  ← " & If(M.ModName.Length > 0, M.ModName, M.ModId) & "（" & M.FileName & "）"
+                    If Not Missing.Contains(Line) Then Missing.Add(Line)
+                End If
+            Next
+        Next
+        Dim Dups As New List(Of String)
+        For Each K In ById.Keys
+            If ById(K).Count > 1 Then Dups.Add(K & "：" & String.Join(" / ", ById(K).ToArray()))
+        Next
+
+        If Missing.Count > 0 OrElse Dups.Count > 0 Then
+            Sb.Append(Environment.NewLine).Append("---- 检查结果 ----").Append(Environment.NewLine)
+            If Missing.Count > 0 Then
+                Sb.Append("可能缺前置（这些 modid 在 mods 里没找到）：").Append(Environment.NewLine)
+                Dim Cnt As Integer = 0
+                For Each L In Missing
+                    Sb.Append("· ").Append(L).Append(Environment.NewLine)
+                    Cnt += 1
+                    If Cnt >= 25 Then
+                        Sb.Append("· ……还有 ").Append(Missing.Count - Cnt).Append(" 条").Append(Environment.NewLine)
+                        Exit For
+                    End If
+                Next
+                Sb.Append("（前置也可能是被某个 mod 内置了 / 用别的 modid 提供，别当成绝对结论；可以再 search_modrinth 确认。）").Append(Environment.NewLine)
+            End If
+            If Dups.Count > 0 Then
+                Sb.Append("重复 modid（同一个 mod 装了多个版本，通常会崩）：").Append(Environment.NewLine)
+                For Each L In Dups
+                    Sb.Append("· ").Append(L).Append(Environment.NewLine)
+                Next
+            End If
+        End If
+
+        If NoMeta.Count > 0 Then
+            Sb.Append(Environment.NewLine).Append("读不到 modid 的文件 ").Append(NoMeta.Count).Append(" 个：").Append(String.Join("、", NoMeta.ToArray())).Append(Environment.NewLine)
+        End If
+
+        Host.LogInfo("AI 工具 mods_scan → " & Inst.Name & "，" & Metas.Count & " 个 jar")
+        Return Sb.ToString()
+    End Function
+
+    ''' <summary>一次性把诊断要用的东西凑齐：实例信息 + 最新崩溃报告 + 日志尾部 + mods 概况。</summary>
+    Private Function ToolDiagnose(ArgsJson As String) As String
+        Dim Sb As New StringBuilder()
+        Dim Inst = TryInstance()
+        If Inst IsNot Nothing Then
+            Sb.Append("== 实例 ==").Append(Environment.NewLine)
+            Sb.Append("名称：").Append(Inst.Name).Append("；版本：").Append(Inst.VersionId)
+            If Not String.IsNullOrWhiteSpace(Inst.InheritName) Then Sb.Append("；继承自：").Append(Inst.InheritName)
+            Sb.Append("；可装模组：").Append(If(Inst.Modable, "是", "否"))
+            Sb.Append(Environment.NewLine).Append("目录：").Append(Inst.PathIndie).Append(Environment.NewLine)
+
+            Dim ModsDir As String = Path.Combine(Inst.PathIndie, "mods")
+            If Directory.Exists(ModsDir) Then
+                Dim Jars = Directory.GetFiles(ModsDir, "*.jar")
+                Dim Disabled = Directory.GetFiles(ModsDir, "*.jar.disabled")
+                Sb.Append("mods：" & Jars.Length & " 个启用，").Append(Disabled.Length).Append(" 个禁用").Append(Environment.NewLine)
+                If Jars.Length > 0 AndAlso Jars.Length <= 60 Then
+                    Sb.Append("已装：")
+                    For Each F In Jars
+                        Sb.Append(Path.GetFileName(F)).Append("；")
+                    Next
+                    Sb.Append(Environment.NewLine)
+                End If
+            Else
+                Sb.Append("mods：没有 mods 目录").Append(Environment.NewLine)
+            End If
+        Else
+            Sb.Append("== 实例 ==").Append(Environment.NewLine).Append("当前没有选中可用的实例。").Append(Environment.NewLine)
+        End If
+
+        Dim CrashPath As String = ""
+        Dim LogPath As String = ""
+        Try
+            Dim L = Host.ListLogs()
+            If L IsNot Nothing Then
+                For Each F In L
+                    Dim P As String = If(F.Path, "")
+                    If P.StartsWith("crash-reports", StringComparison.OrdinalIgnoreCase) AndAlso CrashPath.Length = 0 Then CrashPath = P
+                    If P.StartsWith("logs", StringComparison.OrdinalIgnoreCase) AndAlso P.EndsWith("latest.log", StringComparison.OrdinalIgnoreCase) Then LogPath = P
+                Next
+                If LogPath.Length = 0 Then
+                    For Each F In L
+                        If If(F.Path, "").StartsWith("logs", StringComparison.OrdinalIgnoreCase) Then LogPath = F.Path
+                    Next
+                End If
+            End If
+        Catch ex As Exception
+        End Try
+
+        If CrashPath.Length > 0 Then
+            Dim T As String = ""
+            Try
+                T = Host.ReadLog(CrashPath, 2000)
+            Catch ex As Exception
+            End Try
+            If Not String.IsNullOrWhiteSpace(T) Then
+                Dim Lines As String() = T.Replace(vbCrLf, vbLf).Split(CChar(vbLf))
+                Dim TakeN As Integer = If(Lines.Length > 160, 160, Lines.Length)
+                Sb.Append(Environment.NewLine).Append("== 崩溃报告（最新的 ").Append(CrashPath).Append("，共 ").Append(Lines.Length).Append(" 行，给前 ").Append(TakeN).Append(" 行）==").Append(Environment.NewLine)
+                For I As Integer = 0 To TakeN - 1
+                    Sb.Append(Lines(I)).Append(Environment.NewLine)
+                Next
+                If Lines.Length > TakeN Then Sb.Append("……（后面主要是环境信息与 mod 列表，需要的话用 read_instance_file 读全文）").Append(Environment.NewLine)
+            End If
+        End If
+
+        If LogPath.Length > 0 Then
+            Dim T As String = ""
+            Try
+                T = Host.ReadLog(LogPath, 120)
+            Catch ex As Exception
+            End Try
+            If Not String.IsNullOrWhiteSpace(T) Then
+                Sb.Append(Environment.NewLine).Append("== 日志尾部（").Append(LogPath).Append("，后 120 行）==").Append(Environment.NewLine).Append(T).Append(Environment.NewLine)
+            End If
+        End If
+
+        If CrashPath.Length = 0 AndAlso LogPath.Length = 0 Then
+            Sb.Append(Environment.NewLine).Append("没有找到日志或崩溃报告（这个实例可能还没启动过）。").Append(Environment.NewLine)
+        End If
+
+        If Sb.Length > 14000 Then
+            Sb.Length = 14000
+            Sb.Append(Environment.NewLine).Append("……（诊断内容过长，已截断）")
+        End If
+        Host.LogInfo("AI 工具 diagnose_crash → " & If(Inst IsNot Nothing, Inst.Name, "无实例"))
+        Return Sb.ToString()
+    End Function
+
+    ''' <summary>读当前实例目录里的文本文件；path 为空时给目录概览。只读、限大小、禁越界。</summary>
+    Private Function ToolReadInstanceFile(ArgsJson As String) As String
+        Dim Inst = TryInstance()
+        If Inst Is Nothing Then Return "当前没有选中可用的实例。"
+        Dim Root As String = Path.GetFullPath(Inst.PathIndie)
+        Dim Rel As String = If(JsonStringField(ArgsJson, "path"), "").Trim().Replace("/", "\").TrimStart("\"c)
+
+        If Rel.Length = 0 Then
+            Dim Sb As New StringBuilder()
+            Sb.Append("实例「").Append(Inst.Name).Append("」目录：").Append(Root).Append(Environment.NewLine)
+            Try
+                Dim Files = Directory.GetFiles(Root)
+                If Files.Length > 0 Then
+                    Sb.Append("顶层文件：")
+                    Dim C As Integer = 0
+                    For Each F In Files
+                        Sb.Append(Path.GetFileName(F)).Append(" (").Append(FmtSize(New FileInfo(F).Length)).Append(")；")
+                        C += 1
+                        If C >= 15 Then Sb.Append("……") : Exit For
+                    Next
+                    Sb.Append(Environment.NewLine)
+                End If
+                For Each D In New String() {"mods", "config", "saves", "resourcepacks", "shaderpacks", "logs", "crash-reports", "datapacks", "defaultconfigs"}
+                    Dim P As String = Path.Combine(Root, D)
+                    If Directory.Exists(P) Then
+                        Dim N As Integer = 0
+                        Try
+                            N = Directory.GetFileSystemEntries(P).Length
+                        Catch ex As Exception
+                        End Try
+                        Sb.Append("· ").Append(D).Append("\ （").Append(N).Append(" 项）").Append(Environment.NewLine)
+                    End If
+                Next
+                Sb.Append("用法：read_instance_file path=""options.txt"" 或 path=""config\xxx.toml""。")
+            Catch ex As Exception
+                Sb.Append("读目录失败：").Append(ex.Message)
+            End Try
+            Return Sb.ToString()
+        End If
+
+        If Rel.Contains("..") Then Return "拒绝：路径里不能有 ..（只能读当前实例目录里的文件）。"
+        Dim Full As String
+        Try
+            Full = Path.GetFullPath(Path.Combine(Root, Rel))
+        Catch ex As Exception
+            Return "路径不合法：" & Rel
+        End Try
+        If Not Full.StartsWith(Root.TrimEnd("\"c) & "\", StringComparison.OrdinalIgnoreCase) Then Return "拒绝：只能读当前实例目录里的文件。"
+        If Not File.Exists(Full) Then Return "文件不存在：" & Rel & "（先不带 path 调一次，看看目录里有什么）"
+
+        Dim Ext As String = Path.GetExtension(Full).ToLowerInvariant()
+        Select Case Ext
+            Case ".txt", ".json", ".json5", ".toml", ".cfg", ".conf", ".properties", ".yaml", ".yml", ".md", ".log", ".mcmeta", ".snbt"
+            Case Else
+                Return "只读文本类文件（.txt/.json/.toml/.cfg/.properties/.yaml/.log/.snbt 等），" & Ext & " 不支持。"
+        End Select
+
+        Dim Fi As New FileInfo(Full)
+        If Fi.Length > 512 * 1024 Then Return "文件太大（" & FmtSize(Fi.Length) & "），超过 512 KB 上限。"
+        Try
+            Dim T As String = File.ReadAllText(Full, Encoding.UTF8)
+            If T.Length > 8000 Then T = T.Substring(0, 8000) & Environment.NewLine & "……（还有 " & (T.Length - 8000) & " 字）"
+            Return "文件：" & Rel & "（" & FmtSize(Fi.Length) & "）" & Environment.NewLine & "----------------------------------------" & Environment.NewLine & T
+        Catch ex As Exception
+            Return "读文件失败：" & ex.Message
         End Try
     End Function
 
