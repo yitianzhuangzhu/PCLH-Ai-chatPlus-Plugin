@@ -10,7 +10,7 @@
 
 **要求：支持插件 API v10 的 PCL Harness（3.10.x 起）。**
 
-方式一（推荐）：下载 [`dist/aiplus-0.5.1.pclplugin`](dist/aiplus-0.5.1.pclplugin)，启动器 →「插件」页 →「导入插件…」选中它，启用时确认一次权限弹窗。
+方式一（推荐）：到 [Releases](https://github.com/yitianzhuangzhu/PCLH-Ai-chatPlus-Plugin/releases/latest) 下载 `aiplus-0.5.1.pclplugin`，启动器 →「插件」页 →「导入插件…」选中它，启用时确认一次权限弹窗。仓库里的 [`dist/`](dist) 与 Release 附件是同一个文件。
 
 方式二（手动）：把 `main` 文件夹改名为 `aiplus`，放进 `<启动器目录>\PCLHarness\Plugins\`，重启启动器（或插件页「重新扫描」）。
 
