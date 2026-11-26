@@ -4,13 +4,13 @@
 
 和纯聊天插件的区别：它能**真的操作启动器**——装原版 / 加载器、下载并安装模组、装整合包（新建实例、带封面和默认名字）、启动游戏、改参数、开关模组、读游戏日志。所有改动都通过宿主公开 API 完成，不改启动器本体。
 
-当前版本：**0.5.2**
+当前版本：**0.5.3**
 
 ## 安装
 
 **要求：支持插件 API v10 的 PCL Harness（3.10.x 起）。**
 
-方式一（推荐）：到 [Releases](https://github.com/yitianzhuangzhu/PCLH-Ai-chatPlus-Plugin/releases/latest) 下载 `aiplus-0.5.2.pclplugin`，启动器 →「插件」页 →「导入插件…」选中它，启用时确认一次权限弹窗。仓库里的 [`dist/`](dist) 与 Release 附件是同一个文件。
+方式一（推荐）：到 [Releases](https://github.com/yitianzhuangzhu/PCLH-Ai-chatPlus-Plugin/releases/latest) 下载 `aiplus-0.5.3.pclplugin`，启动器 →「插件」页 →「导入插件…」选中它，启用时确认一次权限弹窗。仓库里的 [`dist/`](dist) 与 Release 附件是同一个文件。
 
 方式二（手动）：把 `main` 文件夹改名为 `aiplus`，放进 `<启动器目录>\PCLHarness\Plugins\`，重启启动器（或插件页「重新扫描」）。
 
@@ -28,8 +28,9 @@
 - **多会话**：新建 / 切换 / 改名 / 删除 / 导出 Markdown，每个会话独立文件，标题由第一句话自动生成。
 - **会话数量上限**：默认保留 50 个会话（插件设置页可改，5–500）。满了以后新建会先清空会话、再清最久没动过的；带草稿的会话最后才动，清理时会告诉你是谁被清了。状态行快满时才显示「（上限 50）」，会话面板另有「清理空会话」按钮手动减负。
 - **输入草稿保留**：草稿按会话保存，切到别的页面再回来、切会话、甚至重开启动器，没发出去的字都还在（含光标位置）。
+- **agent.md 长期约定**：`data\agent.md` 是一份你自己写的 Markdown 规矩，每次请求都会追加到系统提示词后面。改完保存立即生效（按修改时间热加载），插件升级不会覆盖；首次运行自动生成带说明的模板。对话里 `/agent` 查看、`/agent <一句话>` 追加、`/agent reset` 重建；也可以直接跟 AI 说「记住，以后装光影前先问我」，它会用 `remember_convention` 自己写进去，跨会话生效。
 - **上下文可视化**：状态行显示 `上下文 ≈ N / 64.0k (x%) · 上次 ↑输入 ↓输出`，底部有用量条。
-- **工具调用**：28 个工具，模型自己决定调用；单次提问最多 12 轮工具往返，耗尽时强制收尾作答而不是硬掐断。
+- **工具调用**：30 个工具，模型自己决定调用；单次提问最多 12 轮工具往返，耗尽时强制收尾作答而不是硬掐断。
 - **真下载、真安装**：内容文件由宿主直接写进实例并做 SHA-1 校验，任务进启器「任务管理」；整合包交给宿主安装流程，和用户把包拖进启动器完全一样。
 - **CurseForge 免 Key**：走启动器同款国内镜像；配了 Key 时优先官方接口，失败自动回落到镜像。
 
@@ -65,6 +66,8 @@
 | | `list_loaders` | 列出可装的加载器版本 |
 | | `install_loader` | 安装加载器（自动带原版） |
 | | `open_download_page` | 打开启动器下载页 |
+| 约定 | `read_conventions` | 读 `agent.md` 里的长期约定（不凭印象答） |
+| | `remember_convention` | 把一条规矩写进 `agent.md`，跨会话生效 |
 
 权限声明见 `main/plugin.json`：`instance.read/select/install/write`、`modpack.install`、`mods.read/write`、`launch`、`args`、`plugins`、`logs.read`、`settings.global`，以及 `net.hosts` 白名单（未列出的站点会在运行时弹窗请用户授权）。
 
@@ -81,6 +84,7 @@ dist/                   已打包好的 .pclplugin
 
 | 路径 | 内容 |
 | --- | --- |
+| `agent.md` | 你写的长期约定（追加进 system 提示词，升级不覆盖） |
 | `sessions\*.txt` | 会话记录（标题 + Base64 正文） |
 | `drafts\<会话id>.txt` | 输入草稿 |
 | `downloads\` | 下载缓存 |

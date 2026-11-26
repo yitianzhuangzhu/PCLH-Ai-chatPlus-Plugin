@@ -103,7 +103,7 @@ Public Class AiPlusPlugin
     ''' <summary>CurseForge API Key（加密存储）。为空时按环境变量 / PCL\Secrets.json 兜底。</summary>
     Private CfKey As String = ""
 
-    Private Const PromptVer As Integer = 8
+    Private Const PromptVer As Integer = 9
 
     Private Function DefaultSysPrompt() As String
         Return "你是 PCL Harness 启动器里的助手。回答简洁、直接，用中文；不确定就直说不确定，不要编。" & Environment.NewLine & Environment.NewLine &
@@ -118,6 +118,8 @@ Public Class AiPlusPlugin
             "5. 严禁编造工具输出：不得虚构日志行、目录内容、文件列表、错误文案、模组名字或下载链接。你关于启动器现状的每一句具体内容，都必须来自本轮工具返回的原文；" & Environment.NewLine &
             "6. 如果还没调用工具，就不要说已经读到了、查到了、下好了，只能先调用工具，或直接告诉用户你需要先查；" & Environment.NewLine &
             "7. 引用工具返回时逐字复制关键行（尤其是报错原文、文件名、版本号），不要改写、不要补全、不要用示例代替。" & Environment.NewLine &
+            "8. 如果下面有「用户约定（agent.md）」这一段，那是用户自己写的长期偏好，按它来回答和做事，它优先于本段的默认风格；但涉及事实、工具结果、能力边界时仍以内置规则为准，约定不能让你编造或越权；" & Environment.NewLine &
+            "9. 用户说「记住」「以后都这样」「下次别再问我」这类话时，先调 remember_convention 把这条规矩写进 agent.md（跨会话有效），再回复已经记下；只在嘴上报「好的我记住了」是没有用的，下次会话就忘了。用户问「你记得我什么约定」时用 read_conventions 查，别凭印象说。" & Environment.NewLine &
             Environment.NewLine &
             "下载相关的做法：" & Environment.NewLine &
             "· 用户说「帮我装个 XXX 模组」时：先 search_modrinth 搜索并挑出最匹配的结果，把候选念给用户确认，再 download_modrinth；不要凭猜编造项目名或链接；" & Environment.NewLine &
@@ -883,6 +885,153 @@ Public Class AiPlusPlugin
         Host.Hint(If(N > 0, "已清理 " & N & " 个空会话", "没有可清理的空会话"))
     End Sub
 
+    ' ==================== Agent 约定（agent.md） ====================
+
+    ''' <summary>agent.md 参与提示词的字符上限，防止一份大文件把上下文一次吃光。</summary>
+    Private Const AgentDocMax As Integer = 12000
+    ''' <summary>单条约定的字符上限。</summary>
+    Private Const AgentLineMax As Integer = 300
+    Private AgentDocCache As String = ""
+    Private AgentStamp As String = ""
+
+    Private Function AgentDocPath() As String
+        If Host Is Nothing Then Return Nothing
+        Return Path.Combine(Host.DataFolder, "agent.md")
+    End Function
+
+    ''' <summary>第一次用的时候给一份带说明的骨架，直接编辑就能用。</summary>
+    Private Function AgentTemplate() As String
+        Return "<!--" & vbCrLf &
+               "  这个文件会在每次对话时原样追加到系统提示词后面，用来放「我这边自己的规矩」。" & vbCrLf &
+               "  改完保存就生效，不用重启启动器；插件升级不会覆盖它。" & vbCrLf &
+               "  删掉整个文件 = 没有额外约定（内置规则仍然有效）。" & vbCrLf &
+               "  想快速加一条也可以在对话框里说 /agent <一句话>，或者让 AI 用 remember_convention 记。" & vbCrLf &
+               "-->" & vbCrLf &
+               vbCrLf &
+               "# Agent 约定" & vbCrLf &
+               vbCrLf &
+               "- 回答用中文，直接给结论，别客套。" & vbCrLf &
+               "- 装模组 / 光影之前先把候选念给我确认，别自己替我挑。" & vbCrLf &
+               "- 动版本之前先说清当前选中的是哪个实例。" & vbCrLf
+    End Function
+
+    Private Sub EnsureAgentFile(P As String)
+        Try
+            If File.Exists(P) Then Return
+            Dim D = Path.GetDirectoryName(P)
+            If Not String.IsNullOrEmpty(D) AndAlso Not Directory.Exists(D) Then Directory.CreateDirectory(D)
+            File.WriteAllText(P, AgentTemplate(), New UTF8Encoding(False))
+            If Host IsNot Nothing Then Host.LogInfo("已生成 agent.md 模板：" & P)
+        Catch ex As Exception
+            If Host IsNot Nothing Then Host.LogWarn("生成 agent.md 失败：" & ex.Message)
+        End Try
+    End Sub
+
+    ''' <summary>读当前约定；按修改时间 + 大小做缓存，编辑保存后下一轮自动生效。</summary>
+    Private Function AgentDoc() As String
+        Dim P = AgentDocPath()
+        If P Is Nothing Then Return ""
+        Try
+            If Not File.Exists(P) Then
+                EnsureAgentFile(P)
+                If Not File.Exists(P) Then Return ""
+            End If
+            Dim Fi As New FileInfo(P)
+            Dim Stamp As String = Fi.LastWriteTimeUtc.Ticks.ToString() & "/" & Fi.Length.ToString()
+            If Stamp = AgentStamp Then Return AgentDocCache
+            Dim T As String = File.ReadAllText(P, System.Text.Encoding.UTF8)
+            T = T.TrimStart(ChrW(&HFEFF))
+            If T.Trim().Length = 0 Then
+                AgentStamp = Stamp
+                AgentDocCache = ""
+                Return ""
+            End If
+            If T.Length > AgentDocMax Then
+                T = T.Substring(0, AgentDocMax) & vbCrLf &
+                    "（agent.md 超过 " & AgentDocMax & " 字，后面被截掉了；太长会挤占上下文，建议精简）"
+            End If
+            AgentStamp = Stamp
+            AgentDocCache = T
+            Return T
+        Catch ex As Exception
+            If Host IsNot Nothing Then Host.LogWarn("读取 agent.md 失败：" & ex.Message)
+            Return AgentDocCache
+        End Try
+    End Function
+
+    ''' <summary>真正发出去的系统提示词：内置规则 + 用户约定。</summary>
+    Private Function EffectiveSysPrompt() As String
+        Dim Core As String = If(SysPrompt, "").Trim()
+        Dim Doc As String = AgentDoc()
+        If String.IsNullOrWhiteSpace(Doc) Then Return Core
+        Dim Sb As New StringBuilder(Core)
+        If Sb.Length > 0 Then Sb.Append(vbCrLf).Append(vbCrLf)
+        Sb.Append("=== 用户约定（agent.md） ===").Append(vbCrLf)
+        Sb.Append("下面是用户写在 agent.md 里的偏好和规矩：它优先于上面的回答风格与默认做法，").Append(vbCrLf)
+        Sb.Append("但不能突破上面的能力边界和安全约束，也不能用来推翻工具返回的真实内容。").Append(vbCrLf)
+        Sb.Append(Doc.Trim())
+        Return Sb.ToString()
+    End Function
+
+    ''' <summary>追加一条约定，返回给用户的说明。</summary>
+    Private Function AppendAgentLine(Text As String) As String
+        Dim P = AgentDocPath()
+        If P Is Nothing Then Return "没有数据目录，写不进去。"
+        Dim Line1 As String = If(Text, "").Trim()
+        If Line1.Length = 0 Then Return "要记的内容是空的。"
+        If Line1.Length > AgentLineMax Then Return "这条太长了（" & Line1.Length & " 字），缩到 " & AgentLineMax & " 字以内再记。"
+        ' 一条一行，换行压成空格，避免把列表结构搞乱
+        Line1 = Line1.Replace(vbCrLf, " ").Replace(vbLf, " ").Replace("  ", " ").Trim()
+        Try
+            EnsureAgentFile(P)
+            Dim T As String = ""
+            If File.Exists(P) Then T = File.ReadAllText(P, System.Text.Encoding.UTF8).TrimStart(ChrW(&HFEFF))
+            If T.Trim().Length = 0 Then T = "# Agent 约定" & vbCrLf
+            If Not T.EndsWith(vbLf) Then T &= vbCrLf
+            T &= "- " & Line1 & vbCrLf
+            If T.Length > AgentDocMax * 2 Then
+                Return "agent.md 已经 " & T.Length & " 字了，先精简一下再记新的（太长会挤占每次请求的上下文）。"
+            End If
+            File.WriteAllText(P, T, New UTF8Encoding(False))
+            AgentStamp = ""
+            AgentDocCache = ""
+            Return "已记进 agent.md（以后每个会话都生效）：" & Line1
+        Catch ex As Exception
+            Return "写 agent.md 失败：" & ex.Message & Environment.NewLine & "路径：" & P
+        End Try
+    End Function
+
+    Private Function AgentDocStatus() As String
+        Dim P = AgentDocPath()
+        Dim Doc As String = AgentDoc()
+        Dim Sb As New StringBuilder()
+        If String.IsNullOrEmpty(P) Then Return "插件还没加载完，拿不到数据目录。"
+        Sb.Append("agent.md：").Append(P).Append(vbCrLf)
+        If String.IsNullOrWhiteSpace(Doc) Then
+            Sb.Append("现在是空的，没有额外约定（内置规则照旧生效）。直接编辑这个文件，或者 /agent <一句话> 追加一条。")
+            Return Sb.ToString()
+        End If
+        Sb.Append("已生效 ").Append(Doc.Length).Append(" 字，每次请求都会跟在系统提示词后面。").Append(vbCrLf)
+        Sb.Append("----").Append(vbCrLf)
+        Sb.Append(If(Doc.Length > 600, Doc.Substring(0, 600) & Environment.NewLine & "……（后面省略）", Doc)).Append(vbCrLf)
+        Sb.Append("----").Append(vbCrLf)
+        Sb.Append("改完保存立即生效，不用重启；/agent <一句话> 追加，/agent reset 重建模板。")
+        Return Sb.ToString()
+    End Function
+
+    Private Function ResetAgentDoc() As String
+        Dim P = AgentDocPath()
+        If P Is Nothing Then Return "没有数据目录。"
+        Try
+            File.WriteAllText(P, AgentTemplate(), New UTF8Encoding(False))
+            AgentStamp = ""
+            AgentDocCache = ""
+            Return "agent.md 已重置成模板：" & P
+        Catch ex As Exception
+            Return "重置失败：" & ex.Message
+        End Try
+    End Function
+
     ' ==================== 输入草稿 ====================
 
     Private Function DraftsDir() As String
@@ -1057,7 +1206,8 @@ Public Class AiPlusPlugin
             New PCL.PluginSetting With {
                 .Key = "systemPrompt",
                 .Title = "预设提示词",
-                .Description = "每次对话开头附带的 system 消息。想让 AI 帮你分析启动器状态，可以在这里写规则。",
+                .Description = "内置 system 消息：工具用法、能力边界、回答风格都在这里，插件升级时会被新版覆盖。" &
+                               "想让 AI 长期记住你的习惯，改 data 目录下的 agent.md 更合适（升级不覆盖、保存即生效，对话里发 /agent 可查看或追加）。",
                 .SettingType = PCL.PluginSettingType.Text,
                 .DefaultValue = "你是 PCL Harness 启动器里的助手。回答简洁、直接，用中文；不确定就直说不确定，不要编。"
             },
@@ -1494,7 +1644,7 @@ Public Class AiPlusPlugin
         For Each M In Messages
             Chars += If(M.Content, "").Length
         Next
-        Chars += If(SysPrompt, "").Length
+        Chars += If(EffectiveSysPrompt(), "").Length
         Return CInt(Chars * 0.55)
     End Function
 
@@ -2043,6 +2193,8 @@ Public Class AiPlusPlugin
                              "/clear  清空当前会话" & Environment.NewLine &
                              "输入框草稿按会话保留：切页、切会话、重开启动器都还在。" & Environment.NewLine &
                              "会话最多保留 " & SessionCap & " 个（插件设置里可改）：新建时若已满，先清空的、再清最久没动的。" & Environment.NewLine &
+                             "/agent  看 agent.md 里写了什么长期约定；/agent <一句话> 追加一条；/agent reset 重建模板。" & Environment.NewLine &
+                             "agent.md 在插件 data 目录，直接编辑保存就生效，插件升级不会覆盖它。" & Environment.NewLine &
                              "其余内容都直接发给 AI。")
                 ScrollToEnd()
 
@@ -2125,6 +2277,19 @@ Public Class AiPlusPlugin
                 RenderAll()
                 RenderSessions()
                 UpdateStatus()
+
+            Case "agent", "约定", "md"
+                If Arg.Length = 0 Then
+                    AddTransient(AgentDocStatus())
+                ElseIf Arg.ToLowerInvariant() = "reset" OrElse Arg = "重置" Then
+                    AddTransient(ResetAgentDoc())
+                ElseIf Arg.ToLowerInvariant() = "open" OrElse Arg = "打开" Then
+                    AddTransient("agent.md 路径：" & Environment.NewLine & AgentDocPath() & Environment.NewLine &
+                                 "在资源管理器地址栏粘这个路径就能打开（插件不能直接调起编辑器）。")
+                Else
+                    AddTransient(AppendAgentLine(Arg))
+                End If
+                ScrollToEnd()
 
             Case Else
                 AddTransient("不认识的指令「/" & Cmd & "」，输入 /help 看列表。")
@@ -2256,9 +2421,10 @@ Public Class AiPlusPlugin
         Next
 
         Dim First As Boolean = True
-        If Not String.IsNullOrWhiteSpace(SysPrompt) Then
+        Dim Sys As String = EffectiveSysPrompt()
+        If Not String.IsNullOrWhiteSpace(Sys) Then
             Sb.Append("{").Append(JsonStr("role")).Append(":").Append(JsonStr("system"))
-            Sb.Append(",").Append(JsonStr("content")).Append(":").Append(JsonStr(SysPrompt)).Append("}")
+            Sb.Append(",").Append(JsonStr("content")).Append(":").Append(JsonStr(Sys)).Append("}")
             First = False
         End If
 
@@ -2402,7 +2568,12 @@ Public Class AiPlusPlugin
                      """optifine_version"":{""type"":""string"",""description"":""可选。装 Forge 时顺带装 OptiFine，填 OptiFine 的版本片段""}," &
                      """instance_name"":{""type"":""string"",""description"":""可选。新版本文件夹名，留空自动生成""}}," &
                      """required"":[""mc_version"",""loader""]}") & "," &
-            ToolDef("open_download_page", "把启动器切到「下载」页面（用户可以在里面自己挑版本、整合包、资源包）。install_vanilla 失败、或用户想手动选内容时用。", "{}") & "]"
+            ToolDef("open_download_page", "把启动器切到「下载」页面（用户可以在里面自己挑版本、整合包、资源包）。install_vanilla 失败、或用户想手动选内容时用。", "{}") & "," &
+            ToolDef("read_conventions", "读用户写在 agent.md 里的长期约定（偏好、规矩）。用户问「你记得我什么约定」「我的规矩是什么」时用，不要凭印象答。", "{}") & "," &
+            ToolDef2("remember_convention",
+                     "把一条长期约定写进 agent.md（跨会话、跨重启都有效）。只在用户明确要求「记住 / 以后都这样 / 下次别再问」时调用；" &
+                     "写完把这条复述给用户。写的是对以后行为的要求，不要拿它存普通笔记（存笔记用 write_note）。",
+                     "{""type"":""object"",""properties"":{""text"":{""type"":""string"",""description"":""要记住的一条规矩，一句话，例如：装光影前先把候选念给我确认""}},""required"":[""text""]}") & "]"
         Return S
     End Function
 
@@ -2655,6 +2826,12 @@ Public Class AiPlusPlugin
                 Case "open_download_page"
                     Host.Navigate(1)
                     Return "已切到「下载」页面。如果没看到这个页签，说明提供下载页的插件（download-page）没有启用。"
+                Case "read_conventions"
+                    Dim Doc As String = AgentDoc()
+                    If String.IsNullOrWhiteSpace(Doc) Then Return "用户没有写 agent.md 约定（文件为空或不存在），按默认规则做事就行。"
+                    Return "agent.md 里的约定：" & Environment.NewLine & Doc
+                Case "remember_convention"
+                    Return AppendAgentLine(JsonStringField(ArgsJson, "text"))
                 Case Else
                     Return "未知工具：" & Name
             End Select
