@@ -72,6 +72,11 @@ Public Class AiPlusPlugin
     Private ReadOnly Sessions As New List(Of ChatSession)
     ''' <summary>改名模式：下一句回车当成新标题，而不是发给模型。</summary>
     Private RenameMode As Boolean = False
+    ''' <summary>
+    ''' 会话数量上限（插件设置页可改）。会话文件是纯文本、每条消息都存着，
+    ''' 不设上限会一直堆下去；超出时先清空会话、再清最久没动过的。
+    ''' </summary>
+    Private SessionCap As Integer = 50
 
     ' ==================== 输入草稿状态 ====================
     ' 卡片是「每次进启动页就 Factory 重建一次」的，输入框里的字跟着卡片一起没了。
@@ -281,6 +286,7 @@ Public Class AiPlusPlugin
         End If
         ModelName = GetStr("model", "deepseek-chat")
         CtxLimit = GetInt("contextLimit", 64000)
+        SessionCap = Math.Max(5, Math.Min(500, GetInt("maxSessions", 50)))
         CfKey = UnprotectSecret(GetStr("cfApiKey", ""))
         Dim StoredCf As String = GetStr("cfApiKey", "")
         If StoredCf.Length > 0 AndAlso Not StoredCf.StartsWith(SecretPrefix, StringComparison.Ordinal) Then
@@ -577,9 +583,15 @@ Public Class AiPlusPlugin
             SessionTitle = "新对话"
         Else
             SaveSession()
+            ' 会话数量上限：先腾位置再新建，否则会话文件会一直堆下去
+            Dim Removed As List(Of String) = MakeSessionRoom(SessionId, True)
             SessionId = NewSessionId()
             SessionTitle = "新对话"
             Messages.Clear()
+            If Removed.Count > 0 AndAlso Host IsNot Nothing Then
+                Host.Hint("会话最多 " & SessionCap & " 个，已清理最早的 " & Removed.Count & " 个：" &
+                          Shorten(String.Join("、", Removed.ToArray()), 20))
+            End If
         End If
         SaveSession()
         RenameMode = False
@@ -628,14 +640,16 @@ Public Class AiPlusPlugin
         For Each S In Sessions
             If String.Equals(S.Id, Sid, StringComparison.OrdinalIgnoreCase) Then Name = S.Title : Exit For
         Next
-        Try
-            Dim P = SessionPath(Sid)
-            If P IsNot Nothing AndAlso File.Exists(P) Then File.Delete(P)
-        Catch ex As Exception
-            Host.Hint("删除会话失败：" & ex.Message)
-            Return
-        End Try
-        DropDraft(Sid)
+        Dim SidPath = SessionPath(Sid)
+        If SidPath IsNot Nothing AndAlso File.Exists(SidPath) Then
+            If Not RemoveSessionFile(Sid) Then
+                Host.Hint("删除会话失败，看日志")
+                Return
+            End If
+        Else
+            ' 文件本来就不在了，只把残留的草稿清掉
+            DropDraft(Sid)
+        End If
         If String.Equals(Sid, SessionId, StringComparison.OrdinalIgnoreCase) Then
             SessionId = ""
             Messages.Clear()
@@ -751,6 +765,13 @@ Public Class AiPlusPlugin
             Host.SetSetting("lastSession", SessionId)
         Catch ex As Exception
         End Try
+        ' 升级或调低上限后，老数据可能已经超了：启动时补压一次（保留当前会话）
+        If Sessions.Count > SessionCap Then
+            Dim Removed As List(Of String) = MakeSessionRoom(SessionId, False)
+            If Removed.Count > 0 AndAlso Host IsNot Nothing Then
+                Host.LogInfo("会话超过上限 " & SessionCap & "，已清理 " & Removed.Count & " 个")
+            End If
+        End If
         RefreshSessionList()
     End Sub
 
@@ -775,6 +796,92 @@ Public Class AiPlusPlugin
             Return "导出失败：" & ex.Message
         End Try
     End Function
+
+    ' ==================== 会话数量上限 ====================
+    ' 会话文件是「一条消息一行」的纯文本，聊得多了会一直堆：这里给个上限，超出时自动减负，
+    ' 顺序是「没草稿的优先 → 空会话优先 → 最久没动的先删」，尽量别清掉还能接着聊的内容。
+
+    ''' <summary>某个会话是否存着还没发出去的草稿（清理时优先避开）。</summary>
+    Private Function HasDraft(Sid As String) As Boolean
+        If Not SafeId(Sid) Then Return False
+        Dim T As String = ""
+        If DraftCache.TryGetValue(Sid, T) Then Return Not String.IsNullOrWhiteSpace(T)
+        Try
+            Dim P = DraftPath(Sid)
+            Return P IsNot Nothing AndAlso File.Exists(P)
+        Catch ex As Exception
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>删掉一个会话文件（连带它的草稿）；失败只记日志，返回是否成功。</summary>
+    Private Function RemoveSessionFile(Sid As String) As Boolean
+        If Not SafeId(Sid) Then Return False
+        Dim P = SessionPath(Sid)
+        If P Is Nothing Then Return False
+        Try
+            If File.Exists(P) Then File.Delete(P)
+            DropDraft(Sid)
+            Return True
+        Catch ex As Exception
+            If Host IsNot Nothing Then Host.LogWarn("删除会话失败（" & Sid & "）：" & ex.Message)
+            Return False
+        End Try
+    End Function
+
+    ''' <summary>
+    ''' 给新会话腾位置并返回被删掉的标题。LeaveSlot=True 时多留一个位置（马上要新建），
+    ''' False 时只压到上限（启动时补一次清理用）。
+    ''' </summary>
+    Private Function MakeSessionRoom(KeepId As String, LeaveSlot As Boolean) As List(Of String)
+        Dim Removed As New List(Of String)
+        RefreshSessionList()
+        If Sessions.Count < SessionCap Then Return Removed
+
+        Dim Pool As New List(Of ChatSession)
+        For Each S In Sessions
+            If String.Equals(S.Id, KeepId, StringComparison.OrdinalIgnoreCase) Then Continue For
+            Pool.Add(S)
+        Next
+        If Pool.Count = 0 Then Return Removed
+
+        Pool.Sort(New Comparison(Of ChatSession)(
+            Function(A, B)
+                Dim DA As Boolean = HasDraft(A.Id), DB As Boolean = HasDraft(B.Id)
+                If DA <> DB Then Return If(DA, 1, -1)
+                Dim EA As Boolean = (A.Count = 0), EB As Boolean = (B.Count = 0)
+                If EA <> EB Then Return If(EA, -1, 1)
+                Return A.UpdatedAt.CompareTo(B.UpdatedAt)
+            End Function))
+
+        Dim Need As Integer = Sessions.Count - SessionCap + If(LeaveSlot, 1, 0)
+        For Each S In Pool
+            If Need <= 0 Then Exit For
+            If RemoveSessionFile(S.Id) Then
+                Removed.Add(If(String.IsNullOrWhiteSpace(S.Title), S.Id, S.Title))
+                Need -= 1
+            End If
+        Next
+        RefreshSessionList()
+        Return Removed
+    End Function
+
+    ''' <summary>手动减负：清掉所有空会话（当前会话、带草稿的都不动）。</summary>
+    Private Sub CleanEmptySessions()
+        If Host Is Nothing Then Return
+        SaveDraftNow()
+        RefreshSessionList()
+        Dim N As Integer = 0
+        For Each S In Sessions
+            If String.Equals(S.Id, SessionId, StringComparison.OrdinalIgnoreCase) Then Continue For
+            If S.Count > 0 OrElse HasDraft(S.Id) Then Continue For
+            If RemoveSessionFile(S.Id) Then N += 1
+        Next
+        RefreshSessionList()
+        RenderSessions()
+        UpdateStatus()
+        Host.Hint(If(N > 0, "已清理 " & N & " 个空会话", "没有可清理的空会话"))
+    End Sub
 
     ' ==================== 输入草稿 ====================
 
@@ -962,6 +1069,16 @@ Public Class AiPlusPlugin
                 .DefaultValue = 64000,
                 .MinValue = 1000,
                 .MaxValue = 1000000
+            },
+            New PCL.PluginSetting With {
+                .Key = "maxSessions",
+                .Title = "会话数量上限",
+                .Description = "最多保留多少个对话，默认 50。超出时新建会话会先清空会话、再清最久没动过的；" &
+                               "带草稿的会话最后才动，也可以在「会话」面板点「清理空会话」自己减负。",
+                .SettingType = PCL.PluginSettingType.Number,
+                .DefaultValue = 50,
+                .MinValue = 5,
+                .MaxValue = 500
             }
         }
     End Function
@@ -1063,6 +1180,11 @@ Public Class AiPlusPlugin
         Dim ExpBtn As New PCL.MyButton With {.Text = "导出", .Height = 24, .MinWidth = 56}
         AddHandler ExpBtn.Click, Sub(sender, e) Host.Hint(ExportSession())
         SessBar.Children.Add(ExpBtn)
+
+        ' 会话多了以后手动减负：只清空的，当前会话和带草稿的不动
+        Dim PruneBtn As New PCL.MyButton With {.Text = "清理空会话", .Height = 24, .MinWidth = 88, .Margin = New Thickness(6, 0, 0, 0)}
+        AddHandler PruneBtn.Click, Sub(sender, e) CleanEmptySessions()
+        SessBar.Children.Add(PruneBtn)
         SessionPanel.Children.Add(SessBar)
 
         SessionList = New StackPanel()
@@ -1381,13 +1503,21 @@ Public Class AiPlusPlugin
         Return N.ToString()
     End Function
 
+    ''' <summary>状态行里的会话数：快到上限时才把上限显示出来，平时不占地方。</summary>
+    Private Function SessionCountText() As String
+        If Sessions.Count <= 1 Then Return ""
+        Dim T As String = " · 共 " & Sessions.Count & " 个会话"
+        If Sessions.Count >= SessionCap - 5 Then T &= "（上限 " & SessionCap & "）"
+        Return T
+    End Function
+
     Private Sub UpdateStatus()
         If StatusText Is Nothing Then Return
         Dim KeyState As String = "未配置密钥"
         If ApiKey.Length > 0 Then KeyState = "已配置密钥"
         If IsLocalEndpoint() Then KeyState = "本地接口"
         StatusText.Text = Shorten(If(SessionTitle, "新对话"), 16) & " · " & Messages.Count & " 条" &
-                          If(Sessions.Count > 1, " · 共 " & Sessions.Count & " 个会话", "") &
+                          SessionCountText() &
                           If(LastToolCount > 0, " · 工具 " & LastToolCount, "")
 
         If UsageText IsNot Nothing Then
@@ -1912,6 +2042,7 @@ Public Class AiPlusPlugin
                              "/downloads  看已经下载的文件" & Environment.NewLine &
                              "/clear  清空当前会话" & Environment.NewLine &
                              "输入框草稿按会话保留：切页、切会话、重开启动器都还在。" & Environment.NewLine &
+                             "会话最多保留 " & SessionCap & " 个（插件设置里可改）：新建时若已满，先清空的、再清最久没动的。" & Environment.NewLine &
                              "其余内容都直接发给 AI。")
                 ScrollToEnd()
 
@@ -2010,7 +2141,7 @@ Public Class AiPlusPlugin
     Private Function SessionListText() As String
         If Sessions.Count = 0 Then Return "还没有会话。"
         Dim Sb As New StringBuilder()
-        Sb.Append("共 ").Append(Sessions.Count).Append(" 个会话（● 是当前）：")
+        Sb.Append("共 ").Append(Sessions.Count).Append(" / ").Append(SessionCap).Append(" 个会话（● 是当前）：")
         Dim I As Integer = 0
         For Each S In Sessions
             I += 1
