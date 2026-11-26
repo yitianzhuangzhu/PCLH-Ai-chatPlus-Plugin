@@ -106,7 +106,7 @@ Public Class AiPlusPlugin
     ''' <summary>CurseForge API Key（加密存储）。为空时按环境变量 / PCL\Secrets.json 兜底。</summary>
     Private CfKey As String = ""
 
-    Private Const PromptVer As Integer = 11
+    Private Const PromptVer As Integer = 12
 
     Private Function DefaultSysPrompt() As String
         Return "你是 PCL Harness 启动器里的助手。回答简洁、直接，用中文；不确定就直说不确定，不要编。" & Environment.NewLine & Environment.NewLine &
@@ -142,12 +142,21 @@ Public Class AiPlusPlugin
             "· 安装是后台任务：工具返回「已开始」就立刻把关键信息（版本名、目标目录、去右下角任务栏看进度）告诉用户，然后结束这一轮。不要紧接着调 list_instances 去验证——装完之前那个版本一定不在列表里；" & Environment.NewLine &
             "· 只有在用户后来问「装好了吗」时，才 list_instances 查一次；查到就报查到，没查到就说任务栏可能还在跑或失败了、让他看日志，不要连查好几遍。" & Environment.NewLine &
             Environment.NewLine &
+            "装游戏和装内容必须分两步（最容易出错的地方）：" & Environment.NewLine &
+            "· 顺序固定：装游戏本体 / 加载器 / 整合包 → 等它真的装完 → 切到那个实例 → 才能下载 mod / 资源包 / 光影 / 数据包；" & Environment.NewLine &
+            "· 后台安装刚发起（工具返回「已开始」「进度看任务栏」）时，绝对不能接着调任何下载工具。插件会直接拒绝并让你等——那不是故障，是防止把 mod 下进旧实例；" & Environment.NewLine &
+            "· 用户说「做个 XX 整合包」「装个 1.20.1 加几个优化 mod」时，先把方案说清楚（版本、加载器、要哪些 mod），确认后按上面的顺序一步步做，不要一口气把所有工具都发出去；" & Environment.NewLine &
+            "· 整合包本身就带 mods，装完不要再往里补 mod，除非用户明确说要加；" & Environment.NewLine &
+            "· 内容装进的是「当前选中的实例」，不是刚装好的那个。装完先 select_instance 切过去，或者提醒用户回「启动」页刷新并选中新版本，再下内容。" & Environment.NewLine &
+            Environment.NewLine &
             "查资料与诊断的做法：" & Environment.NewLine &
-            "· 要回答「这个模组是干嘛的 / 支不支持某个版本 / 有什么前置」，先 search_modrinth，需要细节再 fetch_url 抓项目页或 Modrinth 接口，别凭训练记忆断言；" & Environment.NewLine &
+            "· 用户用中文问模组 / 物品 / 方块 / 机制 / 教程时，先 search_mcmod（MC百科）：中文名、俗称和适用版本对得最准，返回标题 + 链接 + 摘要；要看正文、前置、支持的版本就 fetch_url 抓返回的条目页；" & Environment.NewLine &
+            "· 要英文原名、下载文件、更新日志、项目页细节时再用 search_modrinth / search_curseforge；两边配合：MC百科查资料，Modrinth / CurseForge 拿下载；" & Environment.NewLine &
+            "· 别凭训练记忆断言模组功能或兼容性，尤其版本号和「最新」这类会过时的信息；" & Environment.NewLine &
             "· 用户说「崩了 / 起不来 / 报错」时，先 diagnose_crash 把崩溃报告和日志拿全再判断；报告里没有的结论不要编，也不知道就说不知道，并指出下一步查哪里；" & Environment.NewLine &
             "· 问「我装了哪些 mod / 有没有冲突 / 缺什么前置」时用 mods_scan（读 jar 里的真实 modid 和依赖声明），不要拿文件名猜版本；" & Environment.NewLine &
             "· 要确认画质、内存、某个 mod 的配置时，用 read_instance_file 读 options.txt / config 下的原文，照着实际值给建议；" & Environment.NewLine &
-            "· fetch_url 只能抓白名单里的站（Modrinth、CurseForge、GitHub、Mojang、镜像），名单外的会弹窗问用户；被拒绝就换站或直接说明拿不到，不要反复抓同一个地址；" & Environment.NewLine &
+            "· fetch_url 只能抓白名单里的站（MC百科、Modrinth、CurseForge、GitHub、Mojang、镜像），名单外的会弹窗问用户；被拒绝就换站或直接说明拿不到，不要反复抓同一个地址；" & Environment.NewLine &
             "· 联网有三条路，别用错：① 服务商自带联网（GLM 的 web_search、Kimi 的 $web_search、Qwen 的 enable_search）由服务端检索，你直接答并给出来源链接即可，不要在答完后又说「我无法联网」；② 有 web_search 工具时优先调它，一次拿到标题 + 链接 + 摘要；③ 已知具体网址才用 fetch_url 抓正文。" & Environment.NewLine &
             "· 搜不到就说搜不到，不要用训练记忆假装是搜到的结果；训练记忆里的版本号、模组发布时间经常过时，涉及「最新 / 现在」的问题一律以工具结果为准。" & Environment.NewLine &
             "· 联网结果和训练记忆要分清楚：说「我查到的」时必须有对应工具返回，否则就说「我印象里」，并且提醒可能过时。" & Environment.NewLine &
@@ -229,6 +238,14 @@ Public Class AiPlusPlugin
     Private ServerSearchBroken As Boolean = False
     ''' <summary>识别联网方式所依赖的三项配置；变了才重新给被拒过的接口一次机会。</summary>
     Private SearchSig As String = ""
+
+    ' ==================== 安装顺序 ====================
+    ''' <summary>已经在后台跑、还没落地的安装（加载器 / 整合包）的目标实例名。空 = 现在没有安装任务。</summary>
+    Private InstallPending As String = ""
+    ''' <summary>上面那个安装是什么时候发起的，用来做过期兜底。</summary>
+    Private InstallPendingAt As DateTime = DateTime.MinValue
+    ''' <summary>最近一次装完的实例名。下载内容时如果当前实例不是它，要提醒一句别装错地方。</summary>
+    Private LastInstalled As String = ""
 
     ' ==================== 生命周期 ====================
 
@@ -1031,7 +1048,9 @@ Public Class AiPlusPlugin
                vbCrLf &
                "- 回答用中文，直接给结论，别客套。" & vbCrLf &
                "- 装模组 / 光影之前先把候选念给我确认，别自己替我挑。" & vbCrLf &
-               "- 动版本之前先说清当前选中的是哪个实例。" & vbCrLf
+               "- 动版本之前先说清当前选中的是哪个实例。" & vbCrLf &
+               "- 装游戏本体 / 加载器 / 整合包时，必须等它真的装完、切到那个实例之后，再下载 mod；不许边装边下。" & vbCrLf &
+               "- 我问模组、物品、方块、玩法这类游戏内容时，先去 MC百科（mcmod.cn）查，别凭记忆答。" & vbCrLf
     End Function
 
     Private Sub EnsureAgentFile(P As String)
@@ -2479,12 +2498,89 @@ Public Class AiPlusPlugin
     ''' <summary>启动器当前的 MC 根目录：优先问宿主（McFolderSelected.Path），其次读 Setup.ini。</summary>
     ' ==================== 实例与内容（API v7.3） ====================
 
+    ' ==================== 安装顺序（先装本体，再下内容） ====================
+
+    ''' <summary>把一个刚发起、还在后台跑的安装记下来；落地之前不许下载任何内容。</summary>
+    Private Sub MarkInstallPending(Name As String)
+        If String.IsNullOrWhiteSpace(Name) Then Return
+        InstallPending = Name.Trim()
+        InstallPendingAt = DateTime.Now
+        If Host IsNot Nothing Then Host.LogInfo("安装任务开始，暂停内容下载：" & InstallPending)
+    End Sub
+
+    ''' <summary>安装是否已经落地：版本 json 出现，或者实例列表里已经有这个名字。</summary>
+    Private Function InstallLanded(Name As String) As Boolean
+        If String.IsNullOrWhiteSpace(Name) Then Return True
+        Try
+            Dim McDir As String = PclMcDir()
+            If McDir.Length > 0 Then
+                If File.Exists(McDir & "versions\" & Name & "\" & Name & ".json") Then Return True
+            End If
+        Catch ex As Exception
+        End Try
+        For Each E In AllInstances()
+            If String.Equals(E.Name, Name, StringComparison.OrdinalIgnoreCase) Then Return True
+        Next
+        Return False
+    End Function
+
+    ''' <summary>
+    ''' 下载内容前的守门员：后台安装没落地就返回一段拒绝文案，落地了返回空串。
+    ''' 堵的就是「游戏本体还没装好，mod 先下进旧实例」这个坑。
+    ''' </summary>
+    Private Function InstallGuard() As String
+        If InstallPending.Length = 0 Then Return ""
+        If (DateTime.Now - InstallPendingAt).TotalMinutes > 45 Then
+            ' 兜底：任务可能失败了、或者用户把启动器关了，别让下载一直被卡住
+            If Host IsNot Nothing Then Host.LogWarn("安装任务超过 45 分钟没落地，解除下载限制：" & InstallPending)
+            InstallPending = ""
+            Return ""
+        End If
+        If Not InstallLanded(InstallPending) Then
+            Return "先别下内容：实例「" & InstallPending & "」还在安装（启动器右下角任务栏在跑），版本文件还没落地。" &
+                   Environment.NewLine &
+                   "这时候下载会装进当前选中的旧实例，等于装错地方，还可能让旧实例起不来。" & Environment.NewLine &
+                   "正确顺序：等任务栏走完 → 用户回「启动」页刷新版本列表并选中 " & InstallPending &
+                   "（或者你先 select_instance）→ 再下载内容。" & Environment.NewLine &
+                   "不要跳过这一步，也不要反复查进度（装完之前查不到）。"
+        End If
+        Dim Done As String = InstallPending
+        InstallPending = ""
+        LastInstalled = Done
+        If Host IsNot Nothing Then Host.LogInfo("安装已落地，恢复内容下载：" & Done)
+        Return ""
+    End Function
+
+    ''' <summary>
+    ''' 刚装完的那个实例和当前选中的不一致时给一句提醒（只提醒一次，不拦截）。
+    ''' 内容是装进「当前实例」的，模型很容易在装完 1.20.1 之后把 mod 下到旧实例里。
+    ''' </summary>
+    Private Function InstanceMismatchHint() As String
+        If LastInstalled.Length = 0 Then Return ""
+        Dim Done As String = LastInstalled
+        LastInstalled = ""
+        Dim Cur As String = ""
+        Try
+            Dim I = Host.InstanceInfo
+            If I IsNot Nothing AndAlso I.Available Then Cur = I.Name
+        Catch ex As Exception
+        End Try
+        If Cur.Length = 0 Then
+            Return "（提示：现在没有选中的实例，文件可能无处可装；刚装好的是「" & Done & "」，先 select_instance 切过去）"
+        End If
+        If Not String.Equals(Cur, Done, StringComparison.OrdinalIgnoreCase) Then
+            Return "（提示：刚装好的是「" & Done & "」，当前选中的是「" & Cur & "」，这次内容会装进「" & Cur & "」。要装进新实例就先 select_instance）"
+        End If
+        Return ""
+    End Function
+
     Private Function AllInstances() As List(Of PCL.PluginInstanceEntry)
         Try
+            If Host Is Nothing Then Return New List(Of PCL.PluginInstanceEntry)
             Dim L = Host.ListInstances()
             If L IsNot Nothing Then Return L
         Catch ex As Exception
-            Host.LogWarn("ListInstances 失败：" & ex.Message)
+            If Host IsNot Nothing Then Host.LogWarn("ListInstances 失败：" & ex.Message)
         End Try
         Return New List(Of PCL.PluginInstanceEntry)
     End Function
@@ -2747,6 +2843,15 @@ Public Class AiPlusPlugin
                      "把一条长期约定写进 agent.md（跨会话、跨重启都有效）。只在用户明确要求「记住 / 以后都这样 / 下次别再问」时调用；" &
                      "写完把这条复述给用户。写的是对以后行为的要求，不要拿它存普通笔记（存笔记用 write_note）。",
                      "{""type"":""object"",""properties"":{""text"":{""type"":""string"",""description"":""要记住的一条规矩，一句话，例如：装光影前先把候选念给我确认""}},""required"":[""text""]}") & "," &
+            ToolDef2("search_mcmod",
+                     "在 MC百科（mcmod.cn）搜模组 / 物品 / 方块 / 教程，返回标题、链接和摘要。" &
+                     "用户用中文问「这个模组是干嘛的 / 什么版本能用 / 有什么前置 / 这个物品怎么获得」时优先用它：中文资料和适用版本比 Modrinth 全，也更容易对上国内玩家的叫法。" &
+                     "它只给资料，没有下载地址；要下载还是走 search_modrinth / search_curseforge。" &
+                     "需要正文细节时拿返回的链接调 fetch_url 抓条目页。",
+                     "{""type"":""object"",""properties"":{" &
+                     """query"":{""type"":""string"",""description"":""关键词，中文或英文都行，例如 机械动力 / jei / 暮色森林""}," &
+                     """limit"":{""type"":""integer"",""description"":""最多返回几条，默认 8，上限 20""}}," &
+                     """required"":[""query""]}") & "," &
             ToolDef2("fetch_url",
                      "抓一个网页或 JSON 接口的正文来读（不是给用户开浏览器）。适合查模组说明、MC wiki、GitHub 的 README / issue、版本清单。" &
                      "返回的是去标签后的纯文本，默认只给前 6000 字。白名单外的站会弹窗问用户要不要放行，被拒绝就换站，不要反复试。",
@@ -2945,6 +3050,32 @@ Public Class AiPlusPlugin
     End Function
 
     Private Function ExecToolCore(Name As String, ArgsJson As String) As String
+        Dim Op As String = If(Name, "").Trim().ToLowerInvariant()
+
+        ' 把内容下载和游戏安装强制拆成前后两步：后台安装没落地就先不下东西
+        Dim TouchesInstance As Boolean =
+            Op = "download_modrinth" OrElse Op = "download_curseforge" OrElse Op = "install_download"
+        If Op = "download_mods_batch" Then
+            TouchesInstance = Not String.Equals(If(JsonStringField(ArgsJson, "install"), "true").Trim(), "false", StringComparison.OrdinalIgnoreCase)
+        ElseIf Op = "download_file" Then
+            TouchesInstance = If(JsonStringField(ArgsJson, "install"), "").Trim().Length > 0
+        End If
+
+        If TouchesInstance Then
+            Dim G As String = InstallGuard()
+            If G.Length > 0 Then Return G
+        End If
+
+        Dim R As String = ExecToolCoreInner(Op, ArgsJson)
+
+        If TouchesInstance Then
+            Dim H As String = InstanceMismatchHint()
+            If H.Length > 0 Then R = H & Environment.NewLine & R
+        End If
+        Return R
+    End Function
+
+    Private Function ExecToolCoreInner(Name As String, ArgsJson As String) As String
         Try
             Select Case If(Name, "").Trim().ToLowerInvariant()
                 Case "list_instances"
@@ -3037,6 +3168,8 @@ Public Class AiPlusPlugin
                     Return ToolWebSearch(ArgsJson)
                 Case "fetch_url"
                     Return ToolFetchUrl(ArgsJson)
+                Case "search_mcmod"
+                    Return ToolSearchMcmod(ArgsJson)
                 Case "mods_scan"
                     Return ToolModsScan(ArgsJson)
                 Case "diagnose_crash"
@@ -3327,6 +3460,103 @@ Public Class AiPlusPlugin
         Return S.Trim()
     End Function
 
+    ''' <summary>行内文本清洗：去标签、解实体、压空白（标题 / 摘要用）。</summary>
+    Private Function CleanInline(S As String) As String
+        Dim T As String = Regex.Replace(If(S, ""), "<[^>]+>", "")
+        T = WebUtility.HtmlDecode(T)
+        T = T.Replace(ChrW(&HA0), " "c)
+        T = Regex.Replace(T, "\s+", " ")
+        Return T.Trim()
+    End Function
+
+    ''' <summary>
+    ''' MC百科（mcmod.cn）搜索。中文模组 / 物品 / 教程最全的一家，只给资料不给下载。
+    ''' 走 search.mcmod.cn 的结果页，按 .result-item 抓标题 + 链接 + 摘要。
+    ''' </summary>
+    Private Function ToolSearchMcmod(ArgsJson As String) As String
+        Dim Q As String = If(JsonStringField(ArgsJson, "query"), "").Trim()
+        If Q.Length = 0 Then Return "缺少 query 参数，例如 jei / 机械动力 / 暮色森林。"
+        Dim Limit As Integer = JsonIntField(ArgsJson, "limit", 8)
+        If Limit < 1 Then Limit = 1
+        If Limit > 20 Then Limit = 20
+
+        Dim Enc As String = Uri.EscapeDataString(Q)
+        Dim U As String = "https://search.mcmod.cn/s?key=" & Enc & "&site=0&filter=0"
+        Dim Raw As String = ""
+        Try
+            Raw = Host.HttpGetString(U)
+        Catch ex As Exception
+            Dim T As Exception = If(ex.InnerException IsNot Nothing, ex.InnerException, ex)
+            If Host IsNot Nothing Then Host.LogWarn("search_mcmod 失败（" & Q & "）：" & T.Message)
+            Return "MC百科搜索失败：" & T.Message & Environment.NewLine &
+                   "search.mcmod.cn 已经在插件白名单里，正常不会弹授权；失败多半是站点超时或临时拦截，稍后再试。" & Environment.NewLine &
+                   "实在要查也可以直接 fetch_url 打开 https://search.mcmod.cn/s?key=" & Enc
+        End Try
+        If Raw Is Nothing Then Raw = ""
+        If Raw.Trim().Length = 0 Then Return "MC百科返回了空响应，稍后再试。"
+        Return ParseMcmodResults(Raw, Q, Limit, Enc)
+    End Function
+
+    ''' <summary>把 search.mcmod.cn 的结果页解析成「标题 + 链接 + 摘要」的纯文本（拆出来是为了能脱离宿主单测）。</summary>
+    Private Function ParseMcmodResults(Raw As String, Q As String, Limit As Integer, Enc As String) As String
+        Dim Blocks = Regex.Matches(Raw, "<div class=""result-item"">(.*?)<div class=""foot"">", RegexOptions.Singleline)
+        If Blocks.Count = 0 Then
+            Return "MC百科没解析出结果（页面版式可能变了，或者关键词没命中）。" & Environment.NewLine &
+                   "换个更短的关键词再试，或直接 fetch_url 打开 https://search.mcmod.cn/s?key=" & Enc
+        End If
+
+        Dim Sb As New StringBuilder()
+        Sb.Append("MC百科「").Append(Q).Append("」搜到 ").Append(Blocks.Count).Append(" 条，列前 ")
+        Dim Show As Integer = Math.Min(Limit, Blocks.Count)
+        Sb.Append(Show).Append(" 条：")
+        Dim N As Integer = 0
+        For Each B As Match In Blocks
+            If N >= Limit Then Exit For
+            Dim Blk As String = B.Groups(1).Value
+
+            Dim Link As String = ""
+            Dim Title As String = ""
+            For Each A As Match In Regex.Matches(Blk, "<a[^>]*href=""([^""]+)""[^>]*>(.*?)</a>", RegexOptions.Singleline)
+                Dim H As String = A.Groups(1).Value.Trim()
+                ' 跳过分类图标和「来自」这类辅助链接，第一个真正的条目链接就是标题
+                If H.Length = 0 Then Continue For
+                If H.IndexOf("/class/category/", StringComparison.Ordinal) >= 0 Then Continue For
+                If H.IndexOf("/category/", StringComparison.Ordinal) >= 0 Then Continue For
+                If H.StartsWith("#", StringComparison.Ordinal) Then Continue For
+                If H.IndexOf("mcmod.cn", StringComparison.OrdinalIgnoreCase) < 0 Then Continue For
+                Link = H
+                Title = CleanInline(A.Groups(2).Value)
+                Exit For
+            Next
+            If Link.Length = 0 OrElse Title.Length = 0 Then Continue For
+            If Link.StartsWith("//", StringComparison.Ordinal) Then Link = "https:" & Link
+
+            Dim Sum As String = ""
+            Dim Bd As Match = Regex.Match(Blk, "<div class=""body"">(.*?)</div>", RegexOptions.Singleline)
+            If Bd.Success Then
+                Sum = HtmlToText(Bd.Groups(1).Value)
+                ' 摘要里带 MC百科自己的 BBCode 标记：[h1=概述]、[mark:title_menu] 之类
+                Sum = Regex.Replace(Sum, "\[[A-Za-z0-9_]+[:=][^\]]{0,80}\]", "")
+                Sum = Regex.Replace(Sum, "\s+", " ").Trim()
+                If Sum.Length > 180 Then Sum = Sum.Substring(0, 180) & "…"
+            End If
+
+            N += 1
+            Sb.Append(Environment.NewLine).Append(N).Append(". ").Append(Title)
+            Sb.Append(Environment.NewLine).Append("   ").Append(Link)
+            If Sum.Length > 0 Then Sb.Append(Environment.NewLine).Append("   ").Append(Sum)
+        Next
+
+        If N = 0 Then
+            Return "MC百科页面解析到 0 条可用结果（版式可能变了）。可以 fetch_url 打开 https://search.mcmod.cn/s?key=" & Enc & " 直接看。"
+        End If
+
+        Sb.Append(Environment.NewLine).Append(Environment.NewLine)
+        Sb.Append("说明：MC百科是资料站，没有下载地址；要看正文、适用版本、前置和教程，拿上面的链接调 fetch_url。")
+        Sb.Append("要下载还是用 search_modrinth / search_curseforge。")
+        Return Sb.ToString()
+    End Function
+
     ''' <summary>GET 一个网址并返回可读正文。走 Host.HttpGetString：白名单内直连，名单外在 net.dynamic 下向用户申请。</summary>
     Private Function ToolFetchUrl(ArgsJson As String) As String
         Dim U As String = If(JsonStringField(ArgsJson, "url"), "").Trim()
@@ -3347,7 +3577,7 @@ Public Class AiPlusPlugin
             If Host IsNot Nothing Then Host.LogWarn("fetch_url 失败（" & U & "）：" & T.Message)
             Return "抓取失败：" & T.Message & Environment.NewLine &
                    "常见原因：这个站不在插件白名单、并且用户拒绝了授权弹窗；或者站点超时 / 需要登录。可以换 Modrinth、CurseForge、GitHub、Mojang 这类已放行的站。" & Environment.NewLine &
-                   "（插件白名单：api.modrinth.com、cdn.modrinth.com、api.curseforge.com、*.forgecdn.net、mod.mcimirror.top、github.com、raw.githubusercontent.com、objects.githubusercontent.com、piston-meta/piston-data/launchermeta.mojang.com、bmclapi2.bangbang93.com）"
+                   "（插件白名单：mcmod.cn、search.mcmod.cn、api.modrinth.com、cdn.modrinth.com、api.curseforge.com、*.forgecdn.net、mod.mcimirror.top、github.com、raw.githubusercontent.com、objects.githubusercontent.com、piston-meta/piston-data/launchermeta.mojang.com、bmclapi2.bangbang93.com）"
         End Try
         If Raw Is Nothing Then Raw = ""
         If Raw.Trim().Length = 0 Then Return "抓到了空响应：" & U
@@ -4640,6 +4870,8 @@ Public Class AiPlusPlugin
             Th.IsBackground = True
             Th.Start()
             Detail = "已在后台开始安装，进度看「任务管理」；装完会在版本列表里多一个实例。"
+            ' UI 线程上只能丢后台，工具立刻返回 —— 这里必须记一笔，否则模型会马上去下 mod
+            MarkInstallPending(Name)
             Return 3
         End If
 
@@ -4683,6 +4915,8 @@ Public Class AiPlusPlugin
                 Else
                     Detail = Name
                 End If
+                ' 新实例装好了，但当前选中的还是旧的；后面要往里加 mod 得先切过去
+                LastInstalled = Detail
                 Return 0
             Case PCL.ModBase.LoadState.Canceled
                 Detail = "安装被取消。"
@@ -5738,6 +5972,8 @@ Public Class AiPlusPlugin
         Sb.Append("支持库和资源文件（libraries / assets）不用现在下：启动器每次启动前会自动补全缺失的文件。")
         Sb.Append(Environment.NewLine)
         Sb.Append("接下来请用户回「启动」页刷新版本列表（或重启启动器），选中 ").Append(Id).Append(" 后点启动。")
+        ' 版本已经落地，但当前选中的还是旧实例；后面下载内容时要提醒先切过去
+        LastInstalled = Id
         Return Sb.ToString()
     End Function
 
@@ -6244,6 +6480,8 @@ Public Class AiPlusPlugin
                    "常见原因：版本目录已存在、临时目录不可写、或下载源连不上。" & Environment.NewLine &
                    "详细原因看启动器日志：" & If(EcFolderOrEmpty().Length > 0, EcFolderOrEmpty() & "\PCLHarness\Log1.txt", "PCLHarness\Log1.txt")
         End If
+        ' 后台任务已经开跑：从现在到它落地之前，下载内容的工具会被拦住
+        MarkInstallPending(InstName)
 
         Dim Sb As New StringBuilder()
         Sb.Append("已开始安装 ").Append(InstName).Append("：").Append(Environment.NewLine)
