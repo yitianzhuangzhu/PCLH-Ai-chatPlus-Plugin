@@ -1,9 +1,9 @@
 {
   "id": "aiplus",
   "name": "AI 助手 Pro",
-  "version": "0.5.6",
+  "version": "0.5.7",
   "author": "异天庄主",
-  "description": "启动页右侧的 AI 对话卡片：多会话（新建 / 切换 / 改名 / 导出，数量上限可设并自动减负，输入草稿按会话保留、切页不丢）、流式输出、上下文用量；支持 agent.md 长期约定（可编辑、热加载、升级不覆盖）；能用服务商自带的联网搜索（GLM web_search、Kimi $web_search、DeepSeek Search 接口、Qwen enable_search，接口不认会自动降级）；内置 MC百科（mcmod.cn）搜索，中文模组资料与适用版本优先从那里查；装游戏按严格顺序执行——先装本体 / 加载器 / 整合包，等它落地并切到该实例后才允许下载内容，避免 mod 下进旧实例；能下载任意直链、Modrinth 与 CurseForge 内容并装进当前实例；会查资料也会看现场：抓网页正文、读 mods 里每个 jar 的真实 modid / 版本 / 依赖、读实例里的 options.txt 与 config、一键汇总崩溃报告与日志。基于插件 API v10：整合包交给宿主安装，内容文件由宿主直接写进实例并做 SHA-1 校验。",
+  "description": "启动页右侧的 AI 对话卡片：多会话聊天、流式输出、草稿不丢，可用 agent.md 记录长期偏好；联网搜索与 MC百科资料查询；下载安装 Modrinth / CurseForge / 整合包 / 直链内容；读实例配置、模组与崩溃日志帮你排查问题。",
   "entry": "AiPlusPlugin",
   "dll": "AiPlus.Plugin.dll",
   "minApiVersion": 10,

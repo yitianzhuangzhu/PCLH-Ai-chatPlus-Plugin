@@ -4,13 +4,13 @@
 
 和纯聊天插件的区别：它能**真的操作启动器**——装原版 / 加载器、下载并安装模组、装整合包（新建实例、带封面和默认名字）、启动游戏、改参数、开关模组、读游戏日志。所有改动都通过宿主公开 API 完成，不改启动器本体。
 
-当前版本：**0.5.6**
+当前版本：**0.5.7**
 
 ## 安装
 
 **要求：支持插件 API v10 的 PCL Harness（3.10.x 起）。**
 
-方式一（推荐）：到 [Releases](https://github.com/yitianzhuangzhu/PCLH-Ai-chatPlus-Plugin/releases/latest) 下载 `aiplus-0.5.6.pclplugin`，启动器 →「插件」页 →「导入插件…」选中它，启用时确认一次权限弹窗。仓库里的 [`dist/`](dist) 与 Release 附件是同一个文件。
+方式一（推荐）：到 [Releases](https://github.com/yitianzhuangzhu/PCLH-Ai-chatPlus-Plugin/releases/latest) 下载 `aiplus-0.5.7.pclplugin`，启动器 →「插件」页 →「导入插件…」选中它，启用时确认一次权限弹窗。仓库里的 [`dist/`](dist) 与 Release 附件是同一个文件。
 
 方式二（手动）：把 `main` 文件夹改名为 `aiplus`，放进 `<启动器目录>\PCLHarness\Plugins\`，重启启动器（或插件页「重新扫描」）。
 
